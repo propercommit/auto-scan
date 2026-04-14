@@ -144,3 +144,93 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
         print(f"  Risk:     {doc_info.risk_level} ({len(doc_info.risks)} issue(s))", file=sys.stderr)
 
     return doc_info
+
+
+# ── Batch analysis ──────────────────────────────────────────────────
+
+BATCH_ANALYSIS_PROMPT = """\
+You are analyzing {num_pages} scanned pages that may come from MULTIPLE different documents, possibly interleaved/mixed.
+Group pages by document using visual cues: letterhead, formatting, topic, page numbers, headers/footers.
+Then classify each group. Return ONLY valid JSON (no markdown) — an array:
+
+[{{"pages": [1, 2], "category": "...", "filename": "YYYY-MM-DD_cat_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
+
+Categories: {categories}
+Pages numbered 1–{num_pages}. Every page in exactly one group. Date from doc or {today}. Lowercase underscores in filenames. Tags: 5-15 lowercase keywords. Filename: include entity names, amounts, ref numbers."""
+
+
+def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], DocumentInfo]]:
+    """Analyze a batch of scanned pages, group by document, classify each group.
+
+    Returns a list of (page_indices, DocumentInfo) tuples where page_indices
+    are 0-based indices into the images list.
+    """
+    if len(images) > 50:
+        raise AnalysisError("Batch scan supports up to 50 pages. Please scan fewer pages.")
+
+    print(f"Batch analyzing {len(images)} pages...", file=sys.stderr)
+    client = anthropic.Anthropic(api_key=config.api_key)
+
+    content: list[dict] = []
+    for img_data in images:
+        # Use smaller images for batch to reduce token cost
+        resized = _resize_for_api(img_data, max_dim=800)
+        b64 = base64.standard_b64encode(resized).decode("ascii")
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+
+    content.append({
+        "type": "text",
+        "text": BATCH_ANALYSIS_PROMPT.format(
+            today=date.today().isoformat(),
+            categories=", ".join(ALL_CATEGORIES),
+            num_pages=len(images),
+        ),
+    })
+
+    try:
+        message = client.messages.create(
+            model=config.claude_model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": content}],
+        )
+    except anthropic.APIError as e:
+        raise AnalysisError(f"Claude API error: {e}") from e
+
+    response_text = message.content[0].text.strip()
+    if response_text.startswith("```"):
+        lines = response_text.split("\n")
+        lines = [l for l in lines if not l.startswith("```")]
+        response_text = "\n".join(lines)
+
+    try:
+        data = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        raise AnalysisError(
+            f"Failed to parse batch response: {e}\n{response_text}"
+        ) from e
+
+    if not isinstance(data, list):
+        raise AnalysisError(f"Expected JSON array from batch analysis, got {type(data).__name__}")
+
+    results = []
+    for doc in data:
+        pages = [p - 1 for p in doc.get("pages", [])]  # 1-indexed → 0-indexed
+        doc_info = DocumentInfo(
+            category=doc.get("category", "other"),
+            filename=doc.get("filename", f"{date.today().isoformat()}_document.pdf"),
+            summary=doc.get("summary", ""),
+            date=doc.get("date"),
+            key_fields=doc.get("key_fields", {}),
+            suggested_categories=doc.get("suggested_categories", []),
+            tags=doc.get("tags", []),
+            risk_level=doc.get("risk_level", "none"),
+            risks=doc.get("risks", []),
+        )
+        results.append((pages, doc_info))
+        print(f"  Doc {len(results)}: {doc_info.filename} (pages {doc.get('pages', [])})", file=sys.stderr)
+
+    print(f"Detected {len(results)} document(s)", file=sys.stderr)
+    return results

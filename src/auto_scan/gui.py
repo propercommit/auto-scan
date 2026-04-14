@@ -16,7 +16,7 @@ from flask import Flask, jsonify, render_template_string, request
 from PIL import Image
 
 from auto_scan import AutoScanError
-from auto_scan.analyzer import ALL_CATEGORIES, DocumentInfo, analyze_document
+from auto_scan.analyzer import ALL_CATEGORIES, DocumentInfo, analyze_batch, analyze_document
 from auto_scan.config import Config, load_config
 from auto_scan.dedup import image_hash
 from auto_scan.history import find_by_hash, record_scan, search_history
@@ -348,6 +348,71 @@ def _run_scan_job(data: dict, mode: str):
                 },
             }
 
+        elif mode == "batch-auto":
+            state["job"]["status"] = "analyzing"
+            _log(f"Batch analyzing {len(images)} pages...")
+            batch_results = analyze_batch(images, config)
+            _log(f"Detected {len(batch_results)} document(s)")
+
+            state["job"]["status"] = "saving"
+            saved = []
+            for pages, doc_info in batch_results:
+                doc_images = [images[p] for p in pages if p < len(images)]
+                h = image_hash(doc_images)
+                state["_last_hash"] = h
+                output_path = save_document(doc_images, doc_info, config, tags=doc_info.tags)
+                _record(config, doc_info, doc_info.category, doc_info.tags, len(doc_images), output_path)
+                saved.append({
+                    "pages": [p + 1 for p in pages],
+                    "category": doc_info.category,
+                    "filename": doc_info.filename,
+                    "summary": doc_info.summary,
+                    "tags": doc_info.tags,
+                    "output_path": str(output_path),
+                    "risk_level": doc_info.risk_level,
+                    "risks": doc_info.risks,
+                })
+                _log(f"  Saved: {output_path.name}")
+
+            state["job"] = {
+                "status": "done",
+                "result": {"ok": True, "batch": True, "documents": saved},
+            }
+
+        elif mode == "batch-assisted":
+            state["job"]["status"] = "analyzing"
+            _log(f"Batch analyzing {len(images)} pages...")
+            batch_results = analyze_batch(images, config)
+            _log(f"Detected {len(batch_results)} document(s)")
+
+            state["pending_images"] = images
+            state["pending_batch_docs"] = batch_results
+            state["pending_config"] = config
+
+            docs = []
+            for pages, doc_info in batch_results:
+                first_page = pages[0] if pages else 0
+                preview_b64 = ""
+                if first_page < len(images):
+                    thumb = _make_thumbnail(images[first_page])
+                    preview_b64 = base64.b64encode(thumb).decode("ascii")
+                docs.append({
+                    "pages": [p + 1 for p in pages],
+                    "preview": preview_b64,
+                    "category": doc_info.category,
+                    "suggested_categories": doc_info.suggested_categories,
+                    "all_categories": ALL_CATEGORIES,
+                    "filename": doc_info.filename, "summary": doc_info.summary,
+                    "date": doc_info.date, "key_fields": doc_info.key_fields,
+                    "tags": doc_info.tags,
+                    "risk_level": doc_info.risk_level, "risks": doc_info.risks,
+                })
+
+            state["job"] = {
+                "status": "done",
+                "result": {"ok": True, "batch": True, "documents": docs},
+            }
+
     except Exception as e:
         _log(f"Error: {e}")
         state["job"] = {"status": "error", "result": {"ok": False, "error": str(e)}}
@@ -373,6 +438,19 @@ def api_scan_assisted():
     data = request.json or {}
     threading.Thread(
         target=_run_scan_job, args=(data, "assisted"), daemon=True,
+    ).start()
+    return jsonify({"ok": True, "status": "started"})
+
+
+@app.route("/api/scan-batch", methods=["POST"])
+def api_scan_batch():
+    """Batch mode: scan all pages, group by document, classify each."""
+    if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
+        return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
+    data = request.json or {}
+    mode = "batch-auto" if data.get("auto", True) else "batch-assisted"
+    threading.Thread(
+        target=_run_scan_job, args=(data, mode), daemon=True,
     ).start()
     return jsonify({"ok": True, "status": "started"})
 
@@ -429,6 +507,54 @@ def api_save_classified():
             "folder": folder,
             "tags": tags,
         })
+    except Exception as e:
+        _log(f"Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/save-batch", methods=["POST"])
+def api_save_batch():
+    """Save all documents from a batch scan with user edits."""
+    data = request.json or {}
+    documents = data.get("documents", [])
+
+    images = state.get("pending_images")
+    batch_docs = state.get("pending_batch_docs")
+    config = state.get("pending_config")
+
+    if not images or not batch_docs:
+        return jsonify({"ok": False, "error": "No pending batch to save."}), 400
+
+    try:
+        results = []
+        for i, edit in enumerate(documents):
+            if i >= len(batch_docs):
+                break
+            pages, doc_info = batch_docs[i]
+
+            if edit.get("filename"):
+                doc_info.filename = edit["filename"]
+            folder = edit.get("folder", "").strip() or doc_info.category
+            tags = edit.get("tags", doc_info.tags)
+
+            doc_images = [images[p] for p in pages if p < len(images)]
+            output_path = save_document(doc_images, doc_info, config, folder=folder, tags=tags)
+            _log(f"Batch saved: {output_path.name}")
+
+            h = image_hash(doc_images)
+            state["_last_hash"] = h
+            _record(config, doc_info, folder, tags, len(doc_images), output_path)
+
+            results.append({
+                "ok": True, "output_path": str(output_path),
+                "folder": folder, "tags": tags, "filename": doc_info.filename,
+            })
+
+        state["pending_images"] = None
+        state["pending_batch_docs"] = None
+        state["pending_config"] = None
+
+        return jsonify({"ok": True, "documents": results})
     except Exception as e:
         _log(f"Error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -552,7 +678,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .risk-alert h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
   .risk-alert ul { margin: 4px 0 0 16px; padding: 0; }
   .risk-alert li { margin-bottom: 2px; }
+  .batch-modal { width: 900px; max-height: 90vh; overflow-y: auto; }
+  .batch-docs { display: flex; flex-direction: column; gap: 14px; max-height: 55vh; overflow-y: auto; padding: 4px; }
+  .batch-doc { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--bg); }
+  .batch-doc-head { display: flex; gap: 12px; }
+  .batch-doc-thumb { width: 64px; height: 88px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); flex-shrink: 0; }
+  .batch-doc-body { flex: 1; min-width: 0; }
+  .batch-doc-pages { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--primary); margin-bottom: 2px; }
+  .batch-doc-summary { font-size: 13px; color: var(--gray); margin-bottom: 8px; }
+  .batch-fields { display: grid; grid-template-columns: 64px 1fr; gap: 5px 10px; font-size: 13px; align-items: center; }
+  .batch-fields label { font-weight: 600; color: var(--gray); }
+  .batch-fields input { padding: 5px 8px; font-size: 13px; font-family: var(--mono); }
+  .batch-tag-grid { display: flex; flex-wrap: wrap; gap: 4px; grid-column: 2; }
+  .batch-tag { padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; font-family: var(--font); cursor: pointer; background: #fff; color: #212529; transition: all .15s; }
+  .batch-tag.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 600; }
+  .batch-tag:hover { border-color: var(--primary); }
+  .batch-tag:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .batch-results { list-style: none; padding: 0; }
+  .batch-results li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .batch-results li:last-child { border-bottom: none; }
+  .batch-results .br-name { font-weight: 600; }
+  .batch-results .br-detail { font-size: 12px; color: var(--gray); }
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } * { transition: none !important; } }
+  @media (max-width: 640px) { .batch-modal { width: 95vw; } }
   @media (max-width: 640px) { .classify-layout { flex-direction: column; } .classify-preview { flex: none; } .classify-modal { width: 95vw; } }
 </style>
 </head>
@@ -606,6 +754,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <p id="mode-desc" style="font-size:13px;color:var(--gray);margin-bottom:12px" aria-live="polite">AI automatically classifies and saves the document.</p>
     <div class="btn-row">
       <button class="btn btn-primary" id="btn-classify" onclick="doScan()" disabled><span class="spinner" aria-hidden="true"></span><span class="sr-only busy-text" hidden>Scanning...</span>Scan &amp; Classify</button>
+      <button class="btn btn-primary" id="btn-batch" onclick="doBatchScan()" disabled style="background:#6d28d9"><span class="spinner" aria-hidden="true"></span>Batch Scan</button>
       <button class="btn btn-secondary" id="btn-scan" onclick="scanOnly()" disabled><span class="spinner" aria-hidden="true"></span><span class="sr-only busy-text" hidden>Scanning...</span>Scan Only</button>
     </div>
   </div>
@@ -621,6 +770,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </dl>
     <div class="risk-alert" id="r-risk" style="display:none"></div>
     <div class="output-path" id="r-path" style="display:none"></div>
+  </div>
+
+  <div class="card" id="batch-results-card" style="display:none" aria-live="polite">
+    <h2 id="batch-results-title">Batch Complete</h2>
+    <ul class="batch-results" id="batch-results-list"></ul>
   </div>
 
   <div class="card">
@@ -684,6 +838,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Batch Review Modal -->
+<div class="modal-overlay" id="batch-modal" role="dialog" aria-modal="true" aria-labelledby="batch-title">
+  <div class="modal batch-modal">
+    <h2 id="batch-title">Batch Scan &mdash; <span id="batch-count">0</span> Documents Detected</h2>
+    <div class="batch-docs" id="batch-docs"></div>
+    <div class="modal-btns" style="margin-top:16px">
+      <button class="btn btn-secondary" onclick="cancelBatch()">Cancel</button>
+      <button class="btn btn-primary" id="btn-save-batch" onclick="saveBatch()">Save All</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
 let currentMode = 'auto';
@@ -738,10 +904,7 @@ function getScanParams() {
   return { source: document.querySelector('input[name="source"]:checked').value, resolution: $('#resolution').value, color: $('#color').value, output_dir: $('#output-dir').value, scanner_ip: $('#scanner-ip').value.trim() };
 }
 function setBusy(busy, statusText) {
-  $('#btn-classify').disabled = busy; $('#btn-scan').disabled = busy;
-  $('#btn-classify').setAttribute('aria-busy', busy);
-  $('#btn-scan').setAttribute('aria-busy', busy);
-  ['#btn-classify','#btn-scan'].forEach(s => $(s).classList.toggle('busy', busy));
+  ['#btn-classify','#btn-scan','#btn-batch'].forEach(s => { const el = $(s); if (el) { el.disabled = busy; el.setAttribute('aria-busy', busy); el.classList.toggle('busy', busy); }});
   document.querySelectorAll('.busy-text').forEach(el => el.hidden = !busy);
   if (statusText) {
     const labels = {scanning: 'Scanning...', analyzing: 'Analyzing...', saving: 'Saving...'};
@@ -779,7 +942,7 @@ async function connect() {
   try {
     const res = await fetch('/api/connect', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ip}) });
     const data = await res.json();
-    if (data.ok) { st.textContent = data.name + ' \u2014 ' + data.state; st.className = 'status connected'; $('#btn-classify').disabled = false; $('#btn-scan').disabled = false; }
+    if (data.ok) { st.textContent = data.name + ' \u2014 ' + data.state; st.className = 'status connected'; $('#btn-classify').disabled = false; $('#btn-scan').disabled = false; $('#btn-batch').disabled = false; }
     else { st.textContent = 'Error: ' + data.error; st.className = 'status error'; }
   } catch(e) { st.textContent = 'Failed: ' + e.message; st.className = 'status error'; }
   refreshLog();
@@ -961,10 +1124,136 @@ async function refreshLog() {
 }
 setInterval(refreshLog, 2000);
 
+// ── Batch scan ──────────────────────────────────────────────────────
+let batchData = [];
+let batchTags = [];
+
+async function doBatchScan() {
+  setBusy(true, 'scanning');
+  $('#results-card').style.display = 'none';
+  $('#batch-results-card').style.display = 'none';
+  try {
+    const auto = currentMode === 'auto';
+    const res = await fetch('/api/scan-batch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), auto}) });
+    const start = await res.json();
+    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    const job = await pollJob();
+    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    else if (job.status === 'done' && job.result && job.result.batch) {
+      if (auto) { showBatchResults(job.result.documents); }
+      else { showBatchModal(job.result.documents); }
+    }
+  } catch(e) { alert('Failed: ' + e.message); }
+  setBusy(false); refreshLog();
+}
+
+function showBatchResults(docs) {
+  const card = $('#batch-results-card');
+  card.style.display = '';
+  $('#batch-results-title').textContent = 'Batch Complete \u2014 ' + docs.length + ' Document' + (docs.length !== 1 ? 's' : '');
+  const list = $('#batch-results-list');
+  list.innerHTML = '';
+  const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+  docs.forEach((doc, i) => {
+    const li = document.createElement('li');
+    const name = doc.filename || (doc.output_path || '').split('/').pop() || 'document';
+    const detail = [doc.folder || doc.category, doc.summary].filter(Boolean).join(' \u2014 ');
+    const pages = doc.pages ? 'Pages ' + doc.pages.join(', ') : '';
+    li.innerHTML = '<span class="br-name">' + esc(name) + '</span>' + (pages ? ' <span class="br-detail">(' + esc(pages) + ')</span>' : '') + (detail ? '<br><span class="br-detail">' + esc(detail) + '</span>' : '');
+    list.appendChild(li);
+  });
+}
+
+function showBatchModal(docs) {
+  batchData = docs;
+  batchTags = docs.map(d => new Set(d.tags || []));
+  $('#batch-count').textContent = docs.length;
+  const container = $('#batch-docs');
+  container.innerHTML = '';
+  const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+
+  docs.forEach((doc, i) => {
+    const card = document.createElement('div');
+    card.className = 'batch-doc';
+
+    let tagsHtml = (doc.tags || []).map(t =>
+      '<button class="batch-tag selected" data-doc="' + i + '" data-tag="' + esc(t) + '" aria-pressed="true">' + esc(t) + '</button>'
+    ).join('');
+
+    let riskHtml = '';
+    if (doc.risk_level && doc.risk_level !== 'none' && doc.risks && doc.risks.length) {
+      const icons = {low: '\u26a0\ufe0f', medium: '\u26a0\ufe0f', high: '\ud83d\udea8'};
+      const labels = {low: 'Low Risk', medium: 'Medium Risk', high: 'High Risk'};
+      riskHtml = '<div class="risk-alert risk-' + esc(doc.risk_level) + '" style="margin-top:8px"><h4>' + (icons[doc.risk_level]||'') + ' ' + esc(labels[doc.risk_level]||doc.risk_level) + '</h4><ul>' + doc.risks.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul></div>';
+    }
+
+    card.innerHTML = '<div class="batch-doc-head">' +
+      '<img class="batch-doc-thumb" src="data:image/jpeg;base64,' + (doc.preview || '') + '" alt="Page preview">' +
+      '<div class="batch-doc-body">' +
+        '<div class="batch-doc-pages">Pages ' + esc((doc.pages || []).join(', ')) + '</div>' +
+        '<div class="batch-doc-summary">' + esc(doc.summary || '') + '</div>' +
+        '<div class="batch-fields">' +
+          '<label>Filename</label><input type="text" id="batch-fn-' + i + '" value="' + esc(doc.filename || '') + '">' +
+          '<label>Folder</label><input type="text" id="batch-folder-' + i + '" value="' + esc(doc.category || 'other') + '" list="folder-suggestions">' +
+          '<label>Tags</label><div class="batch-tag-grid" id="batch-tags-' + i + '">' + tagsHtml + '</div>' +
+        '</div>' +
+        riskHtml +
+      '</div></div>';
+    container.appendChild(card);
+  });
+
+  updateBatchSaveBtn();
+  $('#batch-modal').classList.add('active');
+}
+
+// Event delegation for batch tag toggling
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.batch-tag');
+  if (!btn) return;
+  const docIdx = parseInt(btn.dataset.doc);
+  const tag = btn.dataset.tag;
+  if (batchTags[docIdx].has(tag)) {
+    batchTags[docIdx].delete(tag);
+    btn.classList.remove('selected');
+    btn.setAttribute('aria-pressed', 'false');
+  } else {
+    batchTags[docIdx].add(tag);
+    btn.classList.add('selected');
+    btn.setAttribute('aria-pressed', 'true');
+  }
+  updateBatchSaveBtn();
+});
+
+function updateBatchSaveBtn() {
+  $('#btn-save-batch').textContent = 'Save All (' + batchData.length + ' document' + (batchData.length !== 1 ? 's' : '') + ')';
+}
+
+function cancelBatch() { $('#batch-modal').classList.remove('active'); }
+
+async function saveBatch() {
+  $('#btn-save-batch').disabled = true;
+  const documents = batchData.map((doc, i) => ({
+    folder: ($('#batch-folder-' + i) || {}).value || doc.category,
+    tags: [...batchTags[i]],
+    filename: ($('#batch-fn-' + i) || {}).value || doc.filename,
+  }));
+  try {
+    const res = await fetch('/api/save-batch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({documents, output_dir: $('#output-dir').value}) });
+    const data = await res.json();
+    if (data.ok) {
+      $('#batch-modal').classList.remove('active');
+      showBatchResults(data.documents);
+    } else alert('Error: ' + data.error);
+  } catch(e) { alert('Failed: ' + e.message); }
+  $('#btn-save-batch').disabled = false;
+  refreshLog();
+}
+
 // Keyboard: Escape closes modals
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    if ($('#classify-modal').classList.contains('active')) { cancelClassify(); }
+    if ($('#batch-modal').classList.contains('active')) { cancelBatch(); }
+    else if ($('#classify-modal').classList.contains('active')) { cancelClassify(); }
     else if ($('#api-key-modal').classList.contains('active')) { closeApiModal(); }
   }
 });
