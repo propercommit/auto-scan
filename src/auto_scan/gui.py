@@ -710,22 +710,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-docs { display: flex; flex-direction: column; gap: 14px; max-height: 55vh; overflow-y: auto; padding: 4px; }
   .batch-doc { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--bg); }
   .batch-doc-head { margin-bottom: 10px; }
-  .batch-doc-title { font-size: 13px; font-weight: 700; color: #212529; margin-bottom: 2px; display: flex; align-items: center; gap: 8px; }
+  .batch-doc-title { font-size: 15px; font-weight: 700; color: #212529; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
   .batch-doc-title .batch-doc-label { flex: 1; }
-  .batch-doc-summary { font-size: 13px; color: var(--gray); margin-bottom: 8px; }
+  .batch-doc-summary { font-size: 14px; color: var(--gray); margin-bottom: 8px; }
   .batch-page-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; min-height: 68px; padding: 8px; border: 2px dashed var(--border); border-radius: 8px; transition: border-color .15s, background .15s; }
   .batch-page-grid.drop-target { border-color: var(--primary); background: var(--primary-light); }
   .batch-page { width: 56px; text-align: center; position: relative; border-radius: 6px; transition: opacity .15s; cursor: grab; }
   .batch-page.dragging { opacity: .3; }
   .batch-page img { width: 56px; height: 72px; object-fit: cover; border-radius: 4px; border: 2px solid var(--border); transition: border-color .15s; }
   .batch-page:hover img { border-color: var(--primary); }
-  .batch-page span { display: block; font-size: 10px; color: var(--gray); margin-top: 2px; }
-  .batch-page select { width: 100%; font-size: 9px; padding: 1px; border: 1px solid var(--border); border-radius: 3px; margin-top: 2px; cursor: pointer; }
-  .batch-page-grid-empty { color: var(--gray-light); font-size: 13px; font-style: italic; padding: 16px; text-align: center; width: 100%; }
+  .batch-page span { display: block; font-size: 12px; color: var(--gray); margin-top: 2px; }
+  .batch-page select { width: 100%; font-size: 11px; padding: 2px; border: 1px solid var(--border); border-radius: 3px; margin-top: 2px; cursor: pointer; }
+  .batch-page-grid-empty { color: var(--gray-light); font-size: 14px; font-style: italic; padding: 16px; text-align: center; width: 100%; }
   .btn-add-doc { background: none; border: 2px dashed var(--border); border-radius: 10px; padding: 10px; width: 100%; font-size: 13px; font-weight: 600; color: var(--gray); cursor: pointer; transition: border-color .15s, color .15s; font-family: var(--font); margin-bottom: 8px; }
   .btn-add-doc:hover { border-color: var(--primary); color: var(--primary); }
   .btn-add-doc:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-  .btn-remove-doc { background: none; border: none; color: var(--red); font-size: 12px; cursor: pointer; font-weight: 600; font-family: var(--font); padding: 2px 8px; border-radius: 4px; }
+  .btn-remove-doc { background: none; border: none; color: var(--red); font-size: 13px; cursor: pointer; font-weight: 600; font-family: var(--font); padding: 4px 10px; border-radius: 4px; }
   .btn-remove-doc:hover { background: #f8d7da; }
   .btn-clear { margin-top: 10px; display: inline-block; font-size: 13px; font-weight: 600; color: var(--gray); background: none; border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-family: var(--font); }
   .btn-clear:hover { background: #e9ecef; }
@@ -740,11 +740,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .lightbox-next { right: 16px; }
   .lightbox-close { position: absolute; top: 16px; right: 16px; background: rgba(255,255,255,.15); border: none; color: #fff; font-size: 24px; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; }
   .lightbox-close:hover { background: rgba(255,255,255,.3); }
-  .batch-fields { display: grid; grid-template-columns: 64px 1fr; gap: 5px 10px; font-size: 13px; align-items: center; }
-  .batch-fields label { font-weight: 600; color: var(--gray); }
-  .batch-fields input { padding: 5px 8px; font-size: 13px; font-family: var(--mono); }
-  .batch-tag-grid { display: flex; flex-wrap: wrap; gap: 4px; grid-column: 2; }
-  .batch-tag { padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; font-family: var(--font); cursor: pointer; background: #fff; color: #212529; transition: all .15s; }
+  .batch-fields { display: grid; grid-template-columns: 80px 1fr; gap: 6px 12px; font-size: 14px; align-items: center; }
+  .batch-fields label { font-weight: 600; color: var(--gray); font-size: 13px; }
+  .batch-fields input { padding: 8px 12px; font-size: 14px; font-family: var(--mono); }
+  .batch-tag-grid { display: flex; flex-wrap: wrap; gap: 6px; grid-column: 2; }
+  .batch-add-tag-row { display: flex; gap: 6px; grid-column: 2; margin-top: 4px; }
+  .batch-add-tag-row input { flex: 1; padding: 6px 10px; font-size: 13px; font-family: var(--font); }
+  .batch-add-tag-row button { flex-shrink: 0; padding: 6px 14px; font-size: 13px; }
+  .batch-tag { padding: 6px 14px; border: 2px solid var(--border); border-radius: 8px; font-size: 14px; font-weight: 500; font-family: var(--font); cursor: pointer; background: #fff; color: #212529; transition: all .15s; }
   .batch-tag.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 600; }
   .batch-tag:hover { border-color: var(--primary); }
   .batch-tag:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
@@ -1306,6 +1309,7 @@ function renderBatchDocs() {
         '<label>Filename</label><input type="text" id="batch-fn-' + i + '" value="' + esc(fn) + '">' +
         '<label>Folder</label><input type="text" id="batch-folder-' + i + '" value="' + esc(folder) + '" list="folder-suggestions">' +
         '<label>Tags</label><div class="batch-tag-grid" id="batch-tags-' + i + '">' + tagsHtml + '</div>' +
+        '<label></label><div class="batch-add-tag-row"><input type="text" id="batch-add-tag-' + i + '" placeholder="Add a tag..." aria-label="Add tag to document ' + (i+1) + '"><button class="btn btn-secondary" onclick="addBatchTag(' + i + ')">Add</button></div>' +
       '</div>' +
       riskHtml;
 
@@ -1371,6 +1375,39 @@ function removeBatchDoc(idx) {
   batchPages.splice(idx, 1);
   renderBatchDocs();
 }
+
+function addBatchTag(docIdx) {
+  const input = $('#batch-add-tag-' + docIdx);
+  if (!input) return;
+  const tag = input.value.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!tag) return;
+  if (batchTags[docIdx].has(tag)) { input.value = ''; return; }
+  batchTags[docIdx].add(tag);
+  // Append new tag button without full re-render
+  const grid = $('#batch-tags-' + docIdx);
+  if (grid) {
+    const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+    const btn = document.createElement('button');
+    btn.className = 'batch-tag selected';
+    btn.dataset.doc = docIdx;
+    btn.dataset.tag = tag;
+    btn.setAttribute('aria-pressed', 'true');
+    btn.textContent = tag;
+    grid.appendChild(btn);
+  }
+  input.value = '';
+  input.focus();
+}
+
+// Enter key on batch add-tag inputs
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const input = e.target.closest('[id^="batch-add-tag-"]');
+  if (!input) return;
+  e.preventDefault();
+  const docIdx = parseInt(input.id.replace('batch-add-tag-', ''));
+  addBatchTag(docIdx);
+});
 
 // Event delegation: batch tag toggling
 document.addEventListener('click', e => {
