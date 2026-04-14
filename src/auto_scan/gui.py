@@ -281,6 +281,15 @@ def api_connect():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/disconnect", methods=["POST"])
+def api_disconnect():
+    """Disconnect from the current scanner."""
+    with _state_lock:
+        state["scanner_info"] = None
+    _log("Scanner disconnected")
+    return jsonify({"ok": True})
+
+
 def _do_scan(data: dict) -> tuple[list[bytes], Config]:
     """Common scan logic: connect, check status, scan, return images + config."""
     source = data.get("source", "Feeder")
@@ -770,10 +779,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .status.disconnected { color: var(--gray-light); }
   .scanner-info { display: none; margin-top: 12px; padding: 12px 16px; background: var(--green-bg); border-radius: 8px; align-items: center; gap: 12px; }
   .scanner-info.visible { display: flex; }
-  .scanner-info svg { flex-shrink: 0; color: var(--green); }
+  .scanner-info .scanner-icon { flex-shrink: 0; color: var(--green); }
   .scanner-info-text { flex: 1; min-width: 0; }
   .scanner-info-name { font-size: 14px; font-weight: 700; color: #0a3622; }
   .scanner-info-detail { font-size: 12px; color: #1a6b43; margin-top: 1px; }
+  .btn-disconnect { flex-shrink: 0; width: 32px; height: 32px; border: none; border-radius: 8px; background: rgba(176,42,55,.08); color: var(--red); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, transform .1s; }
+  .btn-disconnect:hover { background: rgba(176,42,55,.18); transform: scale(1.1); }
+  .btn-disconnect:active { transform: scale(.95); }
+  .btn-disconnect:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
   .status.error { color: var(--red); font-weight: 600; }
   .results-grid { display: grid; grid-template-columns: 100px 1fr; gap: 4px 12px; font-size: 14px; }
   .results-grid dt { font-weight: 600; color: var(--gray); }
@@ -967,11 +980,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div class="status disconnected" id="scanner-status" role="status" aria-live="polite">Not connected</div>
     <div class="scanner-info" id="scanner-info">
-      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="2"/><path d="M6 8V5a1 1 0 011-1h10a1 1 0 011 1v3"/><path d="M6 16v2a1 1 0 001 1h10a1 1 0 001-1v-2"/><circle cx="17" cy="12" r="1" fill="currentColor"/></svg>
+      <svg class="scanner-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="2"/><path d="M6 8V5a1 1 0 011-1h10a1 1 0 011 1v3"/><path d="M6 16v2a1 1 0 001 1h10a1 1 0 001-1v-2"/><circle cx="17" cy="12" r="1" fill="currentColor"/></svg>
       <div class="scanner-info-text">
         <div class="scanner-info-name" id="scanner-info-name"></div>
         <div class="scanner-info-detail" id="scanner-info-detail"></div>
       </div>
+      <button class="btn-disconnect" onclick="disconnect()" title="Disconnect scanner" aria-label="Disconnect scanner">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
   </div>
 
@@ -1305,6 +1321,15 @@ async function connect() {
     }
   } catch(e) { st.textContent = 'Failed: ' + e.message; st.className = 'status error'; }
   refreshLog();
+}
+
+function disconnect() {
+  fetch('/api/disconnect', { method: 'POST' }).catch(() => {});
+  $('#scanner-info').classList.remove('visible');
+  const st = $('#scanner-status');
+  st.textContent = 'Not connected'; st.className = 'status disconnected';
+  $('#btn-classify').disabled = true; $('#btn-scan').disabled = true; $('#btn-batch').disabled = true;
+  _log('Scanner disconnected');
 }
 
 async function scanOnly() {
