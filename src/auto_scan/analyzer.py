@@ -51,9 +51,36 @@ class DocumentInfo:
     risks: list[str] = field(default_factory=list)
 
 
+def _open_image(image_data: bytes) -> Image.Image:
+    """Open image bytes, handling formats PIL can't directly open (e.g. PDF from scanner)."""
+    try:
+        img = Image.open(io.BytesIO(image_data))
+        img.load()
+        return img
+    except Exception:
+        pass
+    # Scanner may have returned PDF — extract first page image via pikepdf
+    if image_data[:5] == b"%PDF-":
+        try:
+            import pikepdf
+            pdf = pikepdf.open(io.BytesIO(image_data))
+            page = pdf.pages[0]
+            for image_key in page.images:
+                pil_img = page.images[image_key].as_pil_image()
+                pdf.close()
+                return pil_img
+            pdf.close()
+        except Exception:
+            pass
+    raise AnalysisError(
+        "Cannot read scanned image. The scanner may have returned an unsupported format. "
+        "Try setting document_format to image/jpeg in scanner settings."
+    )
+
+
 def _resize_for_api(image_data: bytes, max_dim: int = 1568) -> bytes:
     """Resize image if either dimension exceeds max_dim, preserving aspect ratio."""
-    img = Image.open(io.BytesIO(image_data))
+    img = _open_image(image_data)
     w, h = img.size
 
     if w <= max_dim and h <= max_dim:
@@ -72,7 +99,7 @@ def _label_page(image_data: bytes, page_num: int, max_dim: int = 1568) -> bytes:
     """Resize an image and burn a page-number label into the top-left corner."""
     from PIL import ImageDraw, ImageFont
 
-    img = Image.open(io.BytesIO(image_data))
+    img = _open_image(image_data)
     w, h = img.size
     if w > max_dim or h > max_dim:
         scale = max_dim / max(w, h)

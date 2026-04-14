@@ -11,7 +11,10 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
+import io
+
 import httpx
+from PIL import Image
 
 from auto_scan import ScanError, ScannerBusyError
 
@@ -55,6 +58,48 @@ class ScanSettings:
             "<scan:Intent>Document</scan:Intent>"
             "</scan:ScanSettings>"
         )
+
+
+def _ensure_jpeg(data: bytes) -> bytes:
+    """Convert scanner output to JPEG if it isn't already.
+
+    Some scanners (notably Canon) may return PDF or other formats even
+    when JPEG was requested. This normalizes everything to JPEG bytes.
+    """
+    # Fast path: already JPEG
+    if data[:2] == b"\xff\xd8":
+        return data
+
+    # Try opening as a regular image (TIFF, PNG, BMP, etc.)
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=92)
+        return buf.getvalue()
+    except Exception:
+        pass
+
+    # Try extracting image from PDF
+    if data[:5] == b"%PDF-":
+        try:
+            import pikepdf
+            pdf = pikepdf.open(io.BytesIO(data))
+            page = pdf.pages[0]
+            for key in page.images:
+                pil_img = page.images[key].as_pil_image()
+                buf = io.BytesIO()
+                pil_img.convert("RGB").save(buf, format="JPEG", quality=92)
+                pdf.close()
+                return buf.getvalue()
+            pdf.close()
+        except Exception:
+            pass
+
+    raise ScanError(
+        "Scanner returned an unrecognized image format. "
+        "Check that your scanner supports JPEG output."
+    )
 
 
 class ESCLClient:
@@ -192,7 +237,7 @@ class ESCLClient:
                     f"Error retrieving page: HTTP {page_resp.status_code}"
                 )
 
-            pages.append(page_resp.content)
+            pages.append(_ensure_jpeg(page_resp.content))
             print(f"  Page {len(pages)} scanned", file=sys.stderr)
             if on_page:
                 on_page(len(pages))
