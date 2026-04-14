@@ -250,12 +250,13 @@ def api_scan():
             _log("Analyzing with Claude Vision...")
             doc_info = analyze_document(images, config)
             _log(f"Classified as: {doc_info.category}")
-            output_path = save_document(images, doc_info, config)
+            output_path = save_document(images, doc_info, config, tags=doc_info.tags)
             _log(f"Saved: {output_path}")
             result.update({
                 "classified": True, "category": doc_info.category,
                 "filename": doc_info.filename, "summary": doc_info.summary,
                 "date": doc_info.date, "output_path": str(output_path),
+                "tags": doc_info.tags,
                 "risk_level": doc_info.risk_level, "risks": doc_info.risks,
             })
         else:
@@ -297,6 +298,7 @@ def api_scan_assisted():
             "summary": doc_info.summary,
             "date": doc_info.date,
             "key_fields": doc_info.key_fields,
+            "tags": doc_info.tags,
             "risk_level": doc_info.risk_level,
             "risks": doc_info.risks,
         })
@@ -433,6 +435,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tag-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .tag-btn.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 700; }
   .tag-btn.suggested { border-color: #9dc2f7; background: #edf3fc; color: var(--primary-text); }
+  .add-tag-row { display: flex; gap: 6px; margin-top: 8px; }
+  .add-tag-row input { flex: 1; padding: 6px 10px; font-size: 13px; }
+  .btn-add-tag { flex-shrink: 0; padding: 6px 14px; width: auto; font-size: 13px; }
   .classify-folder { margin-top: 14px; }
   .classify-folder input[type="text"] { font-family: var(--mono); font-size: 13px; }
   .field-hint { font-size: 12px; color: var(--gray-light); margin-top: 3px; }
@@ -556,12 +561,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="classify-details">
         <div class="classify-summary" id="classify-summary"></div>
         <div class="tag-section">
-          <h3 id="suggested-label">Suggested Tags</h3>
-          <div class="tag-grid" id="suggested-tags" role="group" aria-labelledby="suggested-label"></div>
-        </div>
-        <div class="tag-section">
-          <h3 id="all-cats-label">All Tags</h3>
-          <div class="tag-grid" id="all-tags" role="group" aria-labelledby="all-cats-label"></div>
+          <h3 id="tags-label">Tags</h3>
+          <div class="tag-grid" id="tag-buttons" role="group" aria-labelledby="tags-label"></div>
+          <div class="add-tag-row">
+            <input type="text" id="add-tag-input" placeholder="Add a tag..." aria-label="Add a custom tag">
+            <button class="btn btn-secondary btn-add-tag" onclick="addCustomTag()">Add</button>
+          </div>
         </div>
         <div class="risk-alert" id="classify-risk" style="display:none"></div>
         <div class="classify-folder">
@@ -623,6 +628,7 @@ async function saveApiKey() {
   } catch(e) { err.textContent = 'Error: ' + e.message; }
 }
 $('#api-key-input').addEventListener('keydown', e => { if (e.key === 'Enter') saveApiKey(); });
+$('#add-tag-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addCustomTag(); } });
 
 async function browseFolder() {
   try {
@@ -674,7 +680,7 @@ async function doScanAuto() {
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: true}) });
     const data = await res.json();
-    if (data.ok && data.classified) { showResult({folder: data.category, tags: [data.category], filename: data.filename, summary: data.summary, date: data.date, path: data.output_path, riskLevel: data.risk_level, risks: data.risks}); }
+    if (data.ok && data.classified) { showResult({folder: data.category, tags: data.tags || [data.category], filename: data.filename, summary: data.summary, date: data.date, path: data.output_path, riskLevel: data.risk_level, risks: data.risks}); }
     else if (!data.ok) alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
@@ -718,7 +724,10 @@ function showClassifyModal(data) {
   $('#classify-img').src = 'data:image/jpeg;base64,' + data.preview;
   $('#classify-summary').innerHTML = '<strong>' + (data.summary || '') + '</strong><br>Date: ' + (data.date || 'Unknown');
   $('#classify-fn').value = data.filename || '';
-  selectedTags = new Set(data.suggested_categories || [data.category]);
+
+  // All AI-suggested tags start selected
+  const aiTags = data.tags || [];
+  selectedTags = new Set(aiTags);
 
   // Pre-fill folder with AI's primary category
   $('#classify-folder').value = data.category || 'other';
@@ -732,35 +741,33 @@ function showClassifyModal(data) {
     dl.appendChild(opt);
   });
 
-  const suggestedEl = $('#suggested-tags');
-  suggestedEl.innerHTML = '';
-  (data.suggested_categories || []).forEach(cat => {
-    const btn = document.createElement('button');
-    const sel = selectedTags.has(cat);
-    btn.className = 'tag-btn suggested' + (sel ? ' selected' : '');
-    btn.textContent = cat;
-    btn.setAttribute('aria-pressed', sel);
-    btn.onclick = () => toggleTag(cat);
-    suggestedEl.appendChild(btn);
-  });
-
-  const suggested = new Set(data.suggested_categories || []);
-  const allEl = $('#all-tags');
-  allEl.innerHTML = '';
-  (data.all_categories || []).filter(c => !suggested.has(c)).forEach(cat => {
-    const btn = document.createElement('button');
-    const sel = selectedTags.has(cat);
-    btn.className = 'tag-btn' + (sel ? ' selected' : '');
-    btn.textContent = cat;
-    btn.setAttribute('aria-pressed', sel);
-    btn.onclick = () => toggleTag(cat);
-    allEl.appendChild(btn);
-  });
+  // Render tag buttons
+  renderTagButtons();
 
   pendingRisk = {level: data.risk_level, risks: data.risks};
   renderRisk($('#classify-risk'), data.risk_level, data.risks);
   updateTagCount();
+  $('#add-tag-input').value = '';
   $('#classify-modal').classList.add('active');
+}
+
+function renderTagButtons() {
+  const el = $('#tag-buttons');
+  el.innerHTML = '';
+  // Show all tags (selected ones first, then deselected)
+  const sorted = [...selectedTags];
+  sorted.forEach(tag => {
+    el.appendChild(makeTagBtn(tag, true));
+  });
+}
+
+function makeTagBtn(tag, selected) {
+  const btn = document.createElement('button');
+  btn.className = 'tag-btn' + (selected ? ' selected' : '');
+  btn.textContent = tag;
+  btn.setAttribute('aria-pressed', selected);
+  btn.onclick = () => toggleTag(tag);
+  return btn;
 }
 
 function toggleTag(tag) {
@@ -769,11 +776,23 @@ function toggleTag(tag) {
   } else {
     selectedTags.add(tag);
   }
-  document.querySelectorAll('.tag-btn').forEach(btn => {
+  document.querySelectorAll('#tag-buttons .tag-btn').forEach(btn => {
     const on = selectedTags.has(btn.textContent);
     btn.classList.toggle('selected', on);
     btn.setAttribute('aria-pressed', on);
   });
+  updateTagCount();
+}
+
+function addCustomTag() {
+  const input = $('#add-tag-input');
+  const tag = input.value.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!tag) return;
+  if (selectedTags.has(tag)) { input.value = ''; return; }
+  selectedTags.add(tag);
+  $('#tag-buttons').appendChild(makeTagBtn(tag, true));
+  input.value = '';
+  input.focus();
   updateTagCount();
 }
 

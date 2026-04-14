@@ -38,6 +38,7 @@ Analyze this scanned document. Return ONLY valid JSON (no markdown) with these f
 "date": YYYY-MM-DD or null
 "key_fields": relevant key-value pairs (vendor, amount, reference number, parties, etc.)
 "suggested_categories": 3-5 best matching categories, most relevant first
+"tags": 5-15 lowercase keywords extracted from the document content that describe what this document is about. Include the document type, company/person names, product names, model numbers, topics, and any other identifying terms. Example for a BMW X3 sales contract: ["contract", "sales", "automobile", "bmw", "x3", "g01", "vehicle", "purchase"]. Example for a Vodafone invoice: ["invoice", "vodafone", "telecom", "mobile", "monthly", "march"]. Be specific and thorough.
 "risk_level": "none", "low", "medium", or "high"
 "risks": array of short strings, each describing one concern found in the document. Look for:
   - Scam indicators (fake logos, urgency pressure, unusual payment methods)
@@ -57,6 +58,7 @@ class DocumentInfo:
     date: str | None
     key_fields: dict = field(default_factory=dict)
     suggested_categories: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     risk_level: str = "none"
     risks: list[str] = field(default_factory=list)
 
@@ -142,6 +144,7 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
         date=data.get("date"),
         key_fields=data.get("key_fields", {}),
         suggested_categories=data.get("suggested_categories", []),
+        tags=data.get("tags", []),
         risk_level=data.get("risk_level", "none"),
         risks=data.get("risks", []),
     )
@@ -149,6 +152,8 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     print(f"  Category: {doc_info.category}", file=sys.stderr)
     print(f"  Filename: {doc_info.filename}", file=sys.stderr)
     print(f"  Summary:  {doc_info.summary}", file=sys.stderr)
+    if doc_info.tags:
+        print(f"  Tags:     {', '.join(doc_info.tags)}", file=sys.stderr)
     if doc_info.risks:
         print(f"  Risk:     {doc_info.risk_level} ({len(doc_info.risks)} issue(s))", file=sys.stderr)
 
