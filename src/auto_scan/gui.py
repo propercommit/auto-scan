@@ -2041,7 +2041,7 @@ function renderBatchDocs() {
       }
       moveOpts += '<option value="new">+ New doc</option>';
       pagesHtml += '<div class="batch-page" draggable="true" data-page="' + pNum + '" data-doc="' + i + '">' +
-        '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '" onclick="openLightbox(' + pNum + ')" title="Click to preview" style="cursor:zoom-in" draggable="false">' +
+        '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '" onclick="openLightbox(' + pNum + ',' + i + ')" title="Click to preview" style="cursor:zoom-in" draggable="false">' +
         '<span>Page ' + pNum + '</span>' +
         '<select class="batch-page-move" data-page="' + pNum + '" data-doc="' + i + '" aria-label="Move page ' + pNum + '">' + moveOpts + '</select>' +
         '</div>';
@@ -2250,11 +2250,16 @@ function clearResults() {
 let lightboxPages = []; // Ordered list of page numbers available in lightbox
 let lightboxIdx = 0;    // Current index within lightboxPages
 
-function openLightbox(pageNum) {
-  // Build ordered page list from all batch pages
-  lightboxPages = [];
-  batchPages.forEach(pages => pages.forEach(p => { if (!lightboxPages.includes(p)) lightboxPages.push(p); }));
-  lightboxPages.sort((a, b) => a - b);
+function openLightbox(pageNum, docIdx) {
+  // Navigate only within the document's own pages
+  if (docIdx != null && batchPages[docIdx]) {
+    lightboxPages = [...batchPages[docIdx]].sort((a, b) => a - b);
+  } else {
+    // Fallback: all pages (single-doc mode)
+    lightboxPages = [];
+    batchPages.forEach(pages => pages.forEach(p => { if (!lightboxPages.includes(p)) lightboxPages.push(p); }));
+    lightboxPages.sort((a, b) => a - b);
+  }
   lightboxIdx = lightboxPages.indexOf(pageNum);
   if (lightboxIdx === -1) lightboxIdx = 0;
   showLightboxPage();
@@ -2265,7 +2270,7 @@ function showLightboxPage() {
   const pNum = lightboxPages[lightboxIdx];
   $('#lightbox-img').src = '/api/page-image/' + pNum;
   $('#lightbox-img').alt = 'Page ' + pNum;
-  $('#lightbox-label').textContent = 'Page ' + pNum + ' of ' + lightboxPages.length;
+  $('#lightbox-label').textContent = 'Page ' + pNum + ' (' + (lightboxIdx + 1) + '/' + lightboxPages.length + ')';
 }
 
 function closeLightbox() { $('#lightbox').classList.remove('active'); if (!document.querySelector('.modal-overlay.active')) mainContent.removeAttribute('inert'); }
