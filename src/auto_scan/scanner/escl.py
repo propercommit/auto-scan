@@ -46,18 +46,19 @@ class ScanSettings:
     document_format: str = "image/jpeg"
 
     def to_xml(self) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            f'<scan:ScanSettings xmlns:pwg="{PWG_NS}" xmlns:scan="{SCAN_NS}">'
-            "<pwg:Version>2.0</pwg:Version>"
-            f"<pwg:InputSource>{self.source}</pwg:InputSource>"
-            f"<scan:ColorMode>{self.color_mode}</scan:ColorMode>"
-            f"<scan:XResolution>{self.resolution}</scan:XResolution>"
-            f"<scan:YResolution>{self.resolution}</scan:YResolution>"
-            f"<pwg:DocumentFormat>{self.document_format}</pwg:DocumentFormat>"
-            "<scan:Intent>Document</scan:Intent>"
-            "</scan:ScanSettings>"
-        )
+        # Build XML via ElementTree to prevent injection through field values
+        root = ET.Element("scan:ScanSettings", {
+            "xmlns:pwg": PWG_NS,
+            "xmlns:scan": SCAN_NS,
+        })
+        ET.SubElement(root, "pwg:Version").text = "2.0"
+        ET.SubElement(root, "pwg:InputSource").text = str(self.source)
+        ET.SubElement(root, "scan:ColorMode").text = str(self.color_mode)
+        ET.SubElement(root, "scan:XResolution").text = str(int(self.resolution))
+        ET.SubElement(root, "scan:YResolution").text = str(int(self.resolution))
+        ET.SubElement(root, "pwg:DocumentFormat").text = str(self.document_format)
+        ET.SubElement(root, "scan:Intent").text = "Document"
+        return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
 
 
 def _ensure_jpeg(data: bytes) -> bytes:
@@ -107,7 +108,15 @@ class ESCLClient:
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
+        # TLS verification disabled: most network scanners use self-signed certs.
+        # This means scanner communication is vulnerable to MITM on the local network.
         self._client = httpx.Client(verify=False, timeout=30.0)
+        if base_url.startswith("https"):
+            print(
+                "  Note: TLS certificate verification is disabled for scanner connection "
+                "(self-signed certs are common on network scanners).",
+                file=sys.stderr,
+            )
 
     def close(self) -> None:
         self._client.close()

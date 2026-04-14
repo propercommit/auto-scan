@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,10 @@ from typing import Any
 def _get_db(output_dir: Path) -> sqlite3.Connection:
     db_path = output_dir / ".auto_scan_history.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    new_db = not db_path.exists()
     conn = sqlite3.connect(str(db_path))
+    if new_db:
+        os.chmod(db_path, 0o600)
     conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE IF NOT EXISTS scans (

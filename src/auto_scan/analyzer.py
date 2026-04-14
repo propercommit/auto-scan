@@ -92,17 +92,16 @@ def _open_image(image_data: bytes) -> Image.Image:
 
 
 def _resize_for_api(image_data: bytes, max_dim: int = 1568) -> bytes:
-    """Resize image if either dimension exceeds max_dim, preserving aspect ratio."""
+    """Resize image if needed and strip EXIF metadata before sending to API."""
     img = _open_image(image_data)
     w, h = img.size
 
-    if w <= max_dim and h <= max_dim:
-        return image_data
+    if w > max_dim or h > max_dim:
+        scale = max_dim / max(w, h)
+        new_size = (int(w * scale), int(h * scale))
+        img = img.resize(new_size, Image.LANCZOS)
 
-    scale = max_dim / max(w, h)
-    new_size = (int(w * scale), int(h * scale))
-    img = img.resize(new_size, Image.LANCZOS)
-
+    # Always re-encode to strip EXIF/metadata (scanner serial, timestamps, etc.)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return buf.getvalue()

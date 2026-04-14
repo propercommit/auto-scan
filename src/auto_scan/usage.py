@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import date, datetime
@@ -48,6 +49,7 @@ def _save_usage(usage: dict) -> None:
     path = _usage_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(usage, indent=2) + "\n")
+    os.chmod(path, 0o600)
 
 
 def record_usage(input_tokens: int, output_tokens: int) -> dict:

@@ -31,6 +31,28 @@ app = Flask(__name__)
 # Thread lock for shared mutable state
 _state_lock = threading.Lock()
 
+
+# ── CSRF protection: reject cross-origin POST requests ─────────────
+@app.before_request
+def _csrf_check():
+    """Block POST requests that originate from a different site (CSRF)."""
+    if request.method != "POST":
+        return None
+    origin = request.headers.get("Origin") or ""
+    referer = request.headers.get("Referer") or ""
+    # Allow requests from our own server (localhost / 127.0.0.1)
+    allowed = {f"http://127.0.0.1:{_server_port}", f"http://localhost:{_server_port}"}
+    if origin and origin.rstrip("/") not in allowed:
+        return jsonify({"ok": False, "error": "Cross-origin request blocked"}), 403
+    if not origin and referer:
+        # Check referer as fallback
+        if not any(referer.startswith(a) for a in allowed):
+            return jsonify({"ok": False, "error": "Cross-origin request blocked"}), 403
+    return None
+
+
+_server_port = 8470  # updated by main() before app.run()
+
 # ── Persistent settings ─────────────────────────────────────────────
 
 SETTINGS_DEFAULTS = {
@@ -67,6 +89,7 @@ def _save_settings(settings: dict) -> None:
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n")
+    os.chmod(path, 0o600)
 
 
 # ── App state ────────────────────────────────────────────────────────
@@ -265,6 +288,11 @@ def api_save_key():
     key = data.get("key", "").strip()
     if not key:
         return jsonify({"ok": False, "error": "API key cannot be empty"}), 400
+    # Prevent .env injection via newlines or control characters
+    if any(c in key for c in "\n\r\0"):
+        return jsonify({"ok": False, "error": "Invalid API key (contains control characters)"}), 400
+    if not key.startswith("sk-"):
+        return jsonify({"ok": False, "error": "Invalid API key format (should start with sk-)"}), 400
 
     env_path = None
     for candidate in [Path(".env"), Path(__file__).resolve().parents[2] / ".env"]:
@@ -286,8 +314,10 @@ def api_save_key():
         if not found:
             lines.append(f"ANTHROPIC_API_KEY={key}")
         env_path.write_text("\n".join(lines) + "\n")
+        os.chmod(env_path, 0o600)
     else:
         env_path.write_text(f"ANTHROPIC_API_KEY={key}\n")
+        os.chmod(env_path, 0o600)
 
     os.environ["ANTHROPIC_API_KEY"] = key
     _log("API key saved and loaded")
@@ -314,10 +344,17 @@ def _open_folder_dialog(start_dir: str = "") -> str | None:
     """Open a native folder picker dialog. Returns path or None if cancelled."""
     system = platform.system()
 
+    # Sanitize start_dir to prevent injection into shell commands
+    if start_dir and ('"' in start_dir or "'" in start_dir or "\\" in start_dir
+                       or "\n" in start_dir or "\r" in start_dir or "\0" in start_dir):
+        start_dir = ""  # reject paths with shell metacharacters
+
     if system == "Darwin":
         script = 'set p to POSIX path of (choose folder'
         if start_dir and Path(start_dir).is_dir():
-            script += f' default location POSIX file "{start_dir}"'
+            # AppleScript string: escape backslashes and quotes
+            safe_dir = start_dir.replace("\\", "\\\\").replace('"', '\\"')
+            script += f' default location POSIX file "{safe_dir}"'
         script += ')\nreturn p'
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -342,7 +379,9 @@ def _open_folder_dialog(start_dir: str = "") -> str | None:
             "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
         )
         if start_dir and Path(start_dir).is_dir():
-            ps_script += f'$d.SelectedPath = "{start_dir}"; '
+            # PowerShell: escape quotes, backticks, and dollar signs
+            safe_dir = start_dir.replace('`', '``').replace('"', '`"').replace("$", "`$")
+            ps_script += f'$d.SelectedPath = "{safe_dir}"; '
         ps_script += (
             "$d.Description = 'Select Output Folder'; "
             "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath } else { '' }"
@@ -427,9 +466,17 @@ def api_reveal():
     if not file_path:
         return jsonify({"ok": False, "error": "No path provided"}), 400
 
-    path = Path(file_path)
+    path = Path(file_path).resolve()
     if not path.exists():
         return jsonify({"ok": False, "error": "File not found"}), 404
+
+    # Only allow revealing files within the configured output directory
+    try:
+        output_dir = load_config().output_dir.resolve()
+    except Exception:
+        output_dir = Path("~/Documents/Scans").expanduser().resolve()
+    if not str(path).startswith(str(output_dir)):
+        return jsonify({"ok": False, "error": "Path is outside the output directory"}), 403
 
     try:
         system = platform.system()
@@ -483,9 +530,10 @@ def _do_scan(data: dict) -> tuple[list[bytes], Config]:
                 if job:
                     job["pages_scanned"] = count
 
+        # Use validated config values (not raw user input) to prevent XML injection
         settings = ScanSettings(
-            source=source, color_mode=color,
-            resolution=resolution, document_format=config.scan_format,
+            source=config.scan_source, color_mode=config.color_mode,
+            resolution=config.resolution, document_format=config.scan_format,
         )
         images = client.scan(settings, on_page=_on_page)
 
@@ -504,6 +552,8 @@ def _check_duplicate(images: list[bytes], config: Config) -> dict | None:
 
 def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: list[str], pages: int, output_path) -> None:
     """Record a completed scan in the history database."""
+    with _state_lock:
+        last_hash = state.get("_last_hash")
     record_scan(
         output_dir=config.output_dir,
         filename=doc_info.filename if doc_info else Path(output_path).name,
@@ -516,7 +566,7 @@ def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: li
         risks=doc_info.risks if doc_info else [],
         pages=pages,
         output_path=str(output_path),
-        image_hash=state.get("_last_hash"),
+        image_hash=last_hash,
     )
 
 
@@ -875,7 +925,8 @@ def api_job_cancel():
 @app.route("/api/page-image/<int:page_num>")
 def api_page_image(page_num):
     """Serve a full-size page image for preview. page_num is 1-indexed."""
-    images = state.get("pending_images")
+    with _state_lock:
+        images = state.get("pending_images")
     if not images or page_num < 1 or page_num > len(images):
         return "Not found", 404
     img_data = images[page_num - 1]
@@ -1695,6 +1746,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <script>
 const $ = s => document.querySelector(s);
+const _esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
 const mainContent = document.getElementById('main-content');
 function openModal(id) { $(id).classList.add('active'); mainContent.setAttribute('inert', ''); }
 function closeModal(id) { $(id).classList.remove('active'); if (!document.querySelector('.modal-overlay.active')) mainContent.removeAttribute('inert'); }
@@ -1787,14 +1839,14 @@ async function testOCR() {
       html += '</div>';
     }
     if (data.redaction_works) {
-      result.innerHTML = '<strong style="color:#16a34a">All good!</strong> <span style="font-size:12px;color:var(--gray)">' + data.details + '</span>' + html;
+      result.innerHTML = '<strong style="color:#16a34a">All good!</strong> <span style="font-size:12px;color:var(--gray)">' + _esc(data.details) + '</span>' + html;
     } else if (data.ocr_works) {
-      result.innerHTML = '<strong style="color:#d97706">Partial:</strong> <span style="font-size:12px;color:var(--gray)">' + data.details + '</span>' + html;
+      result.innerHTML = '<strong style="color:#d97706">Partial:</strong> <span style="font-size:12px;color:var(--gray)">' + _esc(data.details) + '</span>' + html;
     } else {
-      result.innerHTML = '<strong style="color:#dc2626">Failed:</strong> <span style="font-size:12px">' + data.details + '</span>' + html;
+      result.innerHTML = '<strong style="color:#dc2626">Failed:</strong> <span style="font-size:12px">' + _esc(data.details) + '</span>' + html;
     }
   } catch(e) {
-    result.innerHTML = '<strong style="color:#dc2626">Request failed:</strong> ' + e.message;
+    result.innerHTML = '<strong style="color:#dc2626">Request failed:</strong> ' + _esc(e.message);
   }
   btn.disabled = false;
   btn.textContent = 'Test OCR';
@@ -2203,7 +2255,7 @@ function showResult({folder, tags, filename, summary, date, path, riskLevel, ris
 
 function showClassifyModal(data) {
   $('#classify-img').src = 'data:image/jpeg;base64,' + data.preview;
-  $('#classify-summary').innerHTML = '<strong>' + (data.summary || '') + '</strong><br>Date: ' + (data.date || 'Unknown');
+  $('#classify-summary').innerHTML = '<strong>' + _esc(data.summary || '') + '</strong><br>Date: ' + _esc(data.date || 'Unknown');
   $('#classify-fn').value = data.filename || '';
 
   // All AI-suggested tags start selected
@@ -3022,7 +3074,9 @@ document.addEventListener('keydown', e => {
 
 
 def main() -> None:
+    global _server_port
     port = 8470
+    _server_port = port
 
     try:
         load_config()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import shutil
 import subprocess
@@ -100,6 +101,7 @@ def save_document(
         counter += 1
 
     output_path.write_bytes(pdf_bytes)
+    os.chmod(output_path, 0o600)  # owner-only: scanned docs may contain sensitive data
     _ocr_pdf(output_path)
 
     print(f"Saved: {output_path}", file=sys.stderr)
@@ -119,6 +121,7 @@ def save_unclassified(images: list[bytes], config: Config) -> Path:
 
     pdf_bytes = img2pdf.convert(images)
     output_path.write_bytes(pdf_bytes)
+    os.chmod(output_path, 0o600)
     _ocr_pdf(output_path)
 
     print(f"Saved: {output_path}", file=sys.stderr)

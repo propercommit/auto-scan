@@ -18,11 +18,11 @@ from PIL import Image, ImageDraw, ImageFilter
 # ── Sensitive patterns ──────────────────────────────────────────────
 
 PATTERNS: dict[str, re.Pattern] = {
-    # Social Security Numbers (US)
-    "ssn": re.compile(r"\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b"),
+    # Social Security Numbers (US) — exclude invalid ranges (000/666/9xx area, 00 group, 0000 serial)
+    "ssn": re.compile(r"\b(?!000|666|9\d\d)\d{3}[-.\s]?(?!00)\d{2}[-.\s]?(?!0000)\d{4}\b"),
     # Swiss AHV/AVS number: 756.XXXX.XXXX.XX
     "ahv": re.compile(r"\b756[.\s]?\d{4}[.\s]?\d{4}[.\s]?\d{2}\b"),
-    # Credit card numbers (13-19 digits, optionally grouped)
+    # Credit card numbers (13-19 digits, optionally grouped) — Luhn validated in _luhn_check
     "credit_card": re.compile(
         r"\b(?:\d{4}[-\s]?){3,4}\d{1,4}\b"
     ),
@@ -40,6 +40,21 @@ PATTERNS: dict[str, re.Pattern] = {
 
 # Default: redact all patterns.
 DEFAULT_ENABLED = {"ssn", "ahv", "credit_card", "iban", "phone", "email", "dob", "passport"}
+
+
+def _luhn_check(num_str: str) -> bool:
+    """Validate a number string with the Luhn algorithm (used by all major card networks)."""
+    digits = [int(d) for d in num_str if d.isdigit()]
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
 
 
 @dataclass
@@ -101,7 +116,11 @@ def redact_image(
         ocr_data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
     except Exception as e:
         print(f"  Redaction OCR failed: {e}", file=sys.stderr)
-        return RedactionResult(redacted_image=image_data)
+        return RedactionResult(
+            redacted_image=image_data,
+            skipped=True,
+            skip_reason=f"OCR failed: {e}",
+        )
 
     # Build text spans with positions: group consecutive words into lines
     n = len(ocr_data["text"])
@@ -134,6 +153,9 @@ def redact_image(
         line_text = " ".join(w["text"] for w in line_words)
         for name, pattern in active.items():
             for match in pattern.finditer(line_text):
+                # Credit card: require Luhn checksum to reduce false positives
+                if name == "credit_card" and not _luhn_check(match.group()):
+                    continue
                 # Map character positions back to word bounding boxes
                 char_pos = 0
                 match_start, match_end = match.start(), match.end()
@@ -142,7 +164,8 @@ def redact_image(
                     word_end = char_pos + len(w["text"])
                     # If this word overlaps with the match, redact it
                     if word_end > match_start and word_start < match_end:
-                        pad = 4  # padding around the word
+                        # Scale padding with word height to handle different DPIs
+                        pad = max(4, w["height"] // 4)
                         redact_boxes.append((
                             w["left"] - pad,
                             w["top"] - pad,
