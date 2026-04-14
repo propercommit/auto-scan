@@ -1,7 +1,7 @@
 [project]
 name = "auto-scan"
 version = "0.1.0"
-description = "Scan documents from Canon GX7050 and auto-classify with AI"
+description = "Scan documents from any network scanner and auto-classify with AI"
 requires-python = ">=3.9"
 dependencies = [
     "httpx>=0.28,<1",

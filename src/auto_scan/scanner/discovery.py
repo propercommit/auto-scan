@@ -1,3 +1,10 @@
+"""mDNS discovery for eSCL (AirScan/Mopria) compatible scanners.
+
+Supports any scanner that advertises _uscan._tcp via mDNS, including:
+Canon, HP, Epson, Brother, Xerox, Ricoh, Kyocera, Lexmark, Samsung,
+Konica Minolta, and other AirScan/Mopria-compatible devices.
+"""
+
 from __future__ import annotations
 
 import sys
@@ -26,10 +33,12 @@ class ScannerInfo:
 
 
 class _ScannerListener:
-    """mDNS listener that stops when a Canon scanner is found."""
+    """mDNS listener that collects all eSCL scanners found on the network."""
 
-    def __init__(self) -> None:
+    def __init__(self, brand_filter: str | None = None) -> None:
         self.found: ScannerInfo | None = None
+        self.all_scanners: list[ScannerInfo] = []
+        self.brand_filter = brand_filter.lower() if brand_filter else None
         self.event = threading.Event()
 
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
@@ -43,17 +52,29 @@ class _ScannerListener:
         }
         device_type = props.get("ty", "")
 
-        if "canon" in device_type.lower() or "canon" in name.lower():
-            addresses = info.parsed_addresses()
-            if not addresses:
-                return
-            self.found = ScannerInfo(
-                ip=addresses[0],
-                port=info.port,
-                root_path=props.get("rs", "/eSCL"),
-                name=device_type or name,
-            )
-            self.event.set()
+        addresses = info.parsed_addresses()
+        if not addresses:
+            return
+
+        scanner = ScannerInfo(
+            ip=addresses[0],
+            port=info.port,
+            root_path=props.get("rs", "/eSCL"),
+            name=device_type or name,
+        )
+        self.all_scanners.append(scanner)
+
+        # If a brand filter is set, only auto-select matching scanners
+        if self.brand_filter:
+            if self.brand_filter in device_type.lower() or self.brand_filter in name.lower():
+                if not self.found:
+                    self.found = scanner
+                    self.event.set()
+        else:
+            # No filter — accept the first scanner found
+            if not self.found:
+                self.found = scanner
+                self.event.set()
 
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         pass
@@ -62,15 +83,24 @@ class _ScannerListener:
         pass
 
 
-def discover_scanner(timeout: float = 5.0) -> ScannerInfo:
-    """Find a Canon eSCL scanner on the local network via mDNS.
+def discover_scanner(
+    timeout: float = 5.0,
+    brand: str | None = None,
+) -> ScannerInfo:
+    """Find an eSCL scanner on the local network via mDNS.
 
-    Raises ScannerNotFoundError if no scanner is found within the timeout.
+    Args:
+        timeout: Seconds to wait for discovery.
+        brand: Optional brand filter (e.g. "canon", "hp", "epson").
+               If None, the first eSCL scanner found is returned.
+
+    Raises ScannerNotFoundError if no matching scanner is found.
     """
-    print("Searching for Canon scanner on the network...", file=sys.stderr)
+    msg = f"Searching for {brand or 'eSCL'} scanner on the network..."
+    print(msg, file=sys.stderr)
 
     zc = Zeroconf()
-    listener = _ScannerListener()
+    listener = _ScannerListener(brand_filter=brand)
     browser = ServiceBrowser(zc, ESCL_SERVICE_TYPE, listener)
 
     try:
@@ -80,8 +110,9 @@ def discover_scanner(timeout: float = 5.0) -> ScannerInfo:
         zc.close()
 
     if listener.found is None:
+        brand_msg = f" {brand}" if brand else ""
         raise ScannerNotFoundError(
-            "Could not find a Canon scanner on the network.\n"
+            f"Could not find a{brand_msg} scanner on the network.\n"
             "Check that the scanner is powered on and connected to Wi-Fi,\n"
             "or set SCANNER_IP in your .env file to skip discovery."
         )
@@ -90,6 +121,31 @@ def discover_scanner(timeout: float = 5.0) -> ScannerInfo:
     return listener.found
 
 
+def discover_all_scanners(timeout: float = 5.0) -> list[ScannerInfo]:
+    """Find all eSCL scanners on the local network.
+
+    Returns a list of ScannerInfo objects (may be empty).
+    """
+    print("Scanning network for all eSCL devices...", file=sys.stderr)
+
+    zc = Zeroconf()
+    listener = _ScannerListener()
+    browser = ServiceBrowser(zc, ESCL_SERVICE_TYPE, listener)
+
+    try:
+        listener.event.wait(timeout=timeout)
+        # Keep listening for the full timeout to find all devices
+        if listener.found:
+            import time
+            time.sleep(max(0, timeout - 0.5))
+    finally:
+        browser.cancel()
+        zc.close()
+
+    print(f"Found {len(listener.all_scanners)} scanner(s)", file=sys.stderr)
+    return listener.all_scanners
+
+
 def scanner_info_from_ip(ip: str, port: int = 443) -> ScannerInfo:
     """Construct ScannerInfo directly from an IP address (skip discovery)."""
-    return ScannerInfo(ip=ip, port=port, root_path="/eSCL", name=f"Canon@{ip}")
+    return ScannerInfo(ip=ip, port=port, root_path="/eSCL", name=f"Scanner@{ip}")

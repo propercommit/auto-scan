@@ -21,7 +21,7 @@ from auto_scan.config import Config, load_config
 from auto_scan.dedup import image_hash
 from auto_scan.history import find_by_hash, record_scan, search_history
 from auto_scan.organizer import save_document, save_unclassified
-from auto_scan.scanner.discovery import ScannerInfo, discover_scanner, scanner_info_from_ip
+from auto_scan.scanner.discovery import ScannerInfo, discover_all_scanners, discover_scanner, scanner_info_from_ip
 from auto_scan.scanner.escl import ESCLClient, ScanSettings
 
 app = Flask(__name__)
@@ -171,6 +171,24 @@ def _open_folder_dialog(start_dir: str = "") -> str | None:
     return None
 
 
+@app.route("/api/discover", methods=["POST"])
+def api_discover():
+    """Discover all eSCL scanners on the network."""
+    try:
+        _log("Scanning network for eSCL scanners...")
+        scanners = discover_all_scanners(timeout=6.0)
+        return jsonify({
+            "ok": True,
+            "scanners": [
+                {"ip": s.ip, "port": s.port, "name": s.name}
+                for s in scanners
+            ],
+        })
+    except Exception as e:
+        _log(f"Discovery error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
     data = request.json or {}
@@ -180,7 +198,7 @@ def api_connect():
             _log(f"Connecting to {ip}...")
             info = scanner_info_from_ip(ip)
         else:
-            _log("Searching for Canon scanner...")
+            _log("Searching for scanner...")
             info = discover_scanner(timeout=8.0)
 
         client = ESCLClient(info.base_url)
@@ -772,8 +790,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="connect-row">
       <div>
         <label for="scanner-ip">Scanner IP (leave blank for auto-discover)</label>
-        <input type="text" id="scanner-ip" placeholder="192.168.1.x">
+        <input type="text" id="scanner-ip" placeholder="192.168.1.x" list="scanner-list">
+        <datalist id="scanner-list"></datalist>
       </div>
+      <button class="btn btn-secondary btn-connect" onclick="discoverScanners()">Find</button>
       <button class="btn btn-primary btn-connect" onclick="connect()">Connect</button>
     </div>
     <div class="status disconnected" id="scanner-status" role="status" aria-live="polite">Not connected</div>
@@ -1001,6 +1021,35 @@ function pollJob() {
       }
     }, 600);
   });
+}
+
+async function discoverScanners() {
+  const st = $('#scanner-status');
+  st.textContent = 'Searching network...'; st.className = 'status disconnected';
+  try {
+    const res = await fetch('/api/discover', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok && data.scanners.length > 0) {
+      const dl = $('#scanner-list');
+      dl.innerHTML = '';
+      data.scanners.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.ip;
+        opt.label = s.name + ' (' + s.ip + ')';
+        dl.appendChild(opt);
+      });
+      st.textContent = 'Found ' + data.scanners.length + ' scanner(s) \u2014 select one and click Connect';
+      st.className = 'status connected';
+      if (data.scanners.length === 1) {
+        $('#scanner-ip').value = data.scanners[0].ip;
+      }
+    } else if (data.ok) {
+      st.textContent = 'No scanners found on the network.'; st.className = 'status error';
+    } else {
+      st.textContent = 'Error: ' + data.error; st.className = 'status error';
+    }
+  } catch(e) { st.textContent = 'Discovery failed: ' + e.message; st.className = 'status error'; }
+  refreshLog();
 }
 
 async function connect() {

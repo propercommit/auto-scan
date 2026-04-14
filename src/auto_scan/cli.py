@@ -13,7 +13,7 @@ from auto_scan.pipeline import run_scan, show_discover, show_status
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="auto-scan",
-        description="Scan documents from Canon GX7050 and auto-classify with AI",
+        description="Scan documents from any eSCL/AirScan network scanner and auto-classify with AI",
     )
 
     # Scan options

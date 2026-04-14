@@ -1,4 +1,4 @@
-"""auto-scan: Scan documents from Canon GX7050 and auto-classify with AI."""
+"""auto-scan: Scan documents from any network scanner and auto-classify with AI."""
 
 
 class AutoScanError(Exception):

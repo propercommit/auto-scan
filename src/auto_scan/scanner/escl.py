@@ -1,4 +1,8 @@
-"""eSCL (AirScan) protocol client for HTTP-based scanner communication."""
+"""eSCL (AirScan/Mopria) protocol client for HTTP-based scanner communication.
+
+Works with any eSCL-compatible scanner: Canon, HP, Epson, Brother,
+Xerox, Ricoh, Kyocera, Lexmark, Samsung, Konica Minolta, etc.
+"""
 
 from __future__ import annotations
 
@@ -174,7 +178,7 @@ class ESCLClient:
                 # No more pages
                 break
             if page_resp.status_code == 503:
-                # Canon devices may return 503 between ADF pages
+                # Some scanners (Canon, HP, etc.) return 503 between ADF pages
                 retries += 1
                 if retries >= max_retries:
                     break
