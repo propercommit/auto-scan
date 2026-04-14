@@ -149,9 +149,21 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
 # ── Batch analysis ──────────────────────────────────────────────────
 
 BATCH_ANALYSIS_PROMPT = """\
-You are analyzing {num_pages} scanned pages that may come from MULTIPLE different documents, possibly interleaved/mixed.
-Group pages by document using visual cues: letterhead, formatting, topic, page numbers, headers/footers.
-Then classify each group. Return ONLY valid JSON (no markdown) — an array:
+You are analyzing {num_pages} scanned pages that may come from MULTIPLE different documents, possibly interleaved/mixed together.
+
+STEP 1 — GROUP PAGES BY DOCUMENT. This is the most critical step. Two pages belong to the SAME document ONLY if they share ALL of:
+- Same physical paper style, weight, color
+- Same font family, font size, text styling (bold, italic patterns)
+- Same page layout, margins, column structure
+- Same letterhead, logo, header/footer design
+- Same sender/author/organization
+- Consistent page numbering sequence (page 1/3, 2/3, 3/3)
+- Same visual "look and feel" overall
+
+Pages that discuss related topics but look visually different (different fonts, different letterheads, different layouts) are SEPARATE documents. A bank statement and a bank letter are two documents even though both are from the same bank — unless they share identical formatting. Prioritize visual/structural similarity over topical similarity.
+
+STEP 2 — Classify each group.
+Return ONLY valid JSON (no markdown) — an array:
 
 [{{"pages": [1, 2], "category": "...", "filename": "YYYY-MM-DD_cat_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
 
@@ -174,7 +186,7 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
     content: list[dict] = []
     for img_data in images:
         # Use smaller images for batch to reduce token cost
-        resized = _resize_for_api(img_data, max_dim=800)
+        resized = _resize_for_api(img_data, max_dim=1200)
         b64 = base64.standard_b64encode(resized).decode("ascii")
         content.append({
             "type": "image",

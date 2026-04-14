@@ -12,7 +12,7 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, render_template_string, request
 from PIL import Image
 
 from auto_scan import AutoScanError
@@ -468,6 +468,17 @@ def api_job():
     return jsonify(job)
 
 
+@app.route("/api/page-image/<int:page_num>")
+def api_page_image(page_num):
+    """Serve a full-size page image for preview. page_num is 1-indexed."""
+    images = state.get("pending_images")
+    if not images or page_num < 1 or page_num > len(images):
+        return "Not found", 404
+    img_data = images[page_num - 1]
+    thumb = _make_thumbnail(img_data, max_dim=1200)
+    return Response(thumb, mimetype="image/jpeg")
+
+
 @app.route("/api/save-classified", methods=["POST"])
 def api_save_classified():
     """Save pending scanned images with folder + tags."""
@@ -706,7 +717,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-page-grid.drop-target { border-color: var(--primary); background: var(--primary-light); }
   .batch-page { width: 56px; text-align: center; position: relative; border-radius: 6px; transition: opacity .15s; cursor: grab; }
   .batch-page.dragging { opacity: .3; }
-  .batch-page img { width: 56px; height: 72px; object-fit: cover; border-radius: 4px; border: 2px solid var(--border); transition: border-color .15s; pointer-events: none; }
+  .batch-page img { width: 56px; height: 72px; object-fit: cover; border-radius: 4px; border: 2px solid var(--border); transition: border-color .15s; }
   .batch-page:hover img { border-color: var(--primary); }
   .batch-page span { display: block; font-size: 10px; color: var(--gray); margin-top: 2px; }
   .batch-page select { width: 100%; font-size: 9px; padding: 1px; border: 1px solid var(--border); border-radius: 3px; margin-top: 2px; cursor: pointer; }
@@ -718,6 +729,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .btn-remove-doc:hover { background: #f8d7da; }
   .btn-clear { margin-top: 10px; display: inline-block; font-size: 13px; font-weight: 600; color: var(--gray); background: none; border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-family: var(--font); }
   .btn-clear:hover { background: #e9ecef; }
+  .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 200; align-items: center; justify-content: center; flex-direction: column; cursor: pointer; }
+  .lightbox.active { display: flex; }
+  .lightbox img { max-width: 92vw; max-height: 85vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; }
+  .lightbox-label { color: #fff; font-size: 15px; font-weight: 600; margin-top: 12px; }
+  .lightbox-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(255,255,255,.15); border: none; color: #fff; font-size: 32px; width: 48px; height: 48px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s; }
+  .lightbox-nav:hover { background: rgba(255,255,255,.3); }
+  .lightbox-nav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  .lightbox-prev { left: 16px; }
+  .lightbox-next { right: 16px; }
+  .lightbox-close { position: absolute; top: 16px; right: 16px; background: rgba(255,255,255,.15); border: none; color: #fff; font-size: 24px; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .lightbox-close:hover { background: rgba(255,255,255,.3); }
   .batch-fields { display: grid; grid-template-columns: 64px 1fr; gap: 5px 10px; font-size: 13px; align-items: center; }
   .batch-fields label { font-weight: 600; color: var(--gray); }
   .batch-fields input { padding: 5px 8px; font-size: 13px; font-family: var(--mono); }
@@ -882,6 +904,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <button class="btn btn-primary" id="btn-save-batch" onclick="saveBatch()">Save All</button>
     </div>
   </div>
+</div>
+
+<!-- Page Lightbox -->
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Page preview">
+  <button class="lightbox-close" onclick="closeLightbox()" aria-label="Close preview">&times;</button>
+  <button class="lightbox-nav lightbox-prev" onclick="lightboxNav(-1)" aria-label="Previous page">&#8249;</button>
+  <button class="lightbox-nav lightbox-next" onclick="lightboxNav(1)" aria-label="Next page">&#8250;</button>
+  <img id="lightbox-img" src="" alt="Full page preview">
+  <div class="lightbox-label" id="lightbox-label"></div>
 </div>
 
 <script>
@@ -1243,7 +1274,7 @@ function renderBatchDocs() {
       }
       moveOpts += '<option value="new">+ New doc</option>';
       pagesHtml += '<div class="batch-page" draggable="true" data-page="' + pNum + '" data-doc="' + i + '">' +
-        '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '">' +
+        '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '" onclick="openLightbox(' + pNum + ')" title="Click to preview" style="cursor:zoom-in" draggable="false">' +
         '<span>Page ' + pNum + '</span>' +
         '<select class="batch-page-move" data-page="' + pNum + '" data-doc="' + i + '" aria-label="Move page ' + pNum + '">' + moveOpts + '</select>' +
         '</div>';
@@ -1411,12 +1442,49 @@ function clearResults() {
   $('#batch-results-card').style.display = 'none';
 }
 
-// Keyboard: Escape closes modals
+// ── Lightbox (fullscreen page preview) ──────────────────────────────
+let lightboxPages = []; // Ordered list of page numbers available in lightbox
+let lightboxIdx = 0;    // Current index within lightboxPages
+
+function openLightbox(pageNum) {
+  // Build ordered page list from all batch pages
+  lightboxPages = [];
+  batchPages.forEach(pages => pages.forEach(p => { if (!lightboxPages.includes(p)) lightboxPages.push(p); }));
+  lightboxPages.sort((a, b) => a - b);
+  lightboxIdx = lightboxPages.indexOf(pageNum);
+  if (lightboxIdx === -1) lightboxIdx = 0;
+  showLightboxPage();
+  $('#lightbox').classList.add('active');
+}
+
+function showLightboxPage() {
+  const pNum = lightboxPages[lightboxIdx];
+  $('#lightbox-img').src = '/api/page-image/' + pNum;
+  $('#lightbox-img').alt = 'Page ' + pNum;
+  $('#lightbox-label').textContent = 'Page ' + pNum + ' of ' + lightboxPages.length;
+}
+
+function closeLightbox() { $('#lightbox').classList.remove('active'); }
+
+function lightboxNav(dir) {
+  lightboxIdx = (lightboxIdx + dir + lightboxPages.length) % lightboxPages.length;
+  showLightboxPage();
+}
+
+// Click lightbox background to close (but not on image or buttons)
+$('#lightbox').addEventListener('click', e => { if (e.target === $('#lightbox')) closeLightbox(); });
+
+// Keyboard: Escape closes modals / lightbox, arrows navigate lightbox
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    if ($('#batch-modal').classList.contains('active')) { cancelBatch(); }
+    if ($('#lightbox').classList.contains('active')) { closeLightbox(); }
+    else if ($('#batch-modal').classList.contains('active')) { cancelBatch(); }
     else if ($('#classify-modal').classList.contains('active')) { cancelClassify(); }
     else if ($('#api-key-modal').classList.contains('active')) { closeApiModal(); }
+  }
+  if ($('#lightbox').classList.contains('active')) {
+    if (e.key === 'ArrowLeft') lightboxNav(-1);
+    if (e.key === 'ArrowRight') lightboxNav(1);
   }
 });
 
