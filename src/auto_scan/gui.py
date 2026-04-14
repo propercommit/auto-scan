@@ -26,6 +26,41 @@ from auto_scan.scanner.escl import ESCLClient, ScanSettings
 
 app = Flask(__name__)
 
+# ── Persistent settings ─────────────────────────────────────────────
+
+SETTINGS_DEFAULTS = {
+    "output_dir": "~/Documents/Scans",
+    "scanner_ip": "",
+    "resolution": "300",
+    "color_mode": "RGB24",
+    "scan_source": "Feeder",
+    "mode": "auto",
+}
+
+
+def _settings_path() -> Path:
+    return Path.home() / ".auto_scan" / "settings.json"
+
+
+def _load_settings() -> dict:
+    path = _settings_path()
+    if path.exists():
+        try:
+            import json as _json
+            data = _json.loads(path.read_text())
+            return {**SETTINGS_DEFAULTS, **data}
+        except Exception:
+            pass
+    return dict(SETTINGS_DEFAULTS)
+
+
+def _save_settings(settings: dict) -> None:
+    import json as _json
+    path = _settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(settings, indent=2) + "\n")
+
+
 # ── App state ────────────────────────────────────────────────────────
 
 state = {
@@ -71,6 +106,22 @@ def index():
 def api_config():
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     return jsonify({"has_api_key": has_key})
+
+
+@app.route("/api/settings")
+def api_get_settings():
+    return jsonify(_load_settings())
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_save_settings():
+    data = request.json or {}
+    current = _load_settings()
+    for key in SETTINGS_DEFAULTS:
+        if key in data:
+            current[key] = data[key]
+    _save_settings(current)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/save-key", methods=["POST"])
@@ -945,6 +996,20 @@ let selectedTags = new Set();
 let pendingRisk = {level: null, risks: []};
 
 (async function init() {
+  // Load saved settings
+  try {
+    const res = await fetch('/api/settings');
+    const s = await res.json();
+    if (s.output_dir) $('#output-dir').value = s.output_dir;
+    if (s.scanner_ip) $('#scanner-ip').value = s.scanner_ip;
+    if (s.resolution) $('#resolution').value = s.resolution;
+    if (s.color_mode) $('#color').value = s.color_mode;
+    if (s.scan_source) {
+      const radio = document.querySelector('input[name="source"][value="' + s.scan_source + '"]');
+      if (radio) radio.checked = true;
+    }
+    if (s.mode) setMode(s.mode);
+  } catch(e) {}
   if (!$('#output-dir').value) $('#output-dir').value = '~/Documents/Scans';
   try {
     const res = await fetch('/api/config');
@@ -953,6 +1018,18 @@ let pendingRisk = {level: null, risks: []};
   } catch(e) {}
   refreshLog();
 })();
+
+function saveSettings() {
+  const settings = {
+    output_dir: $('#output-dir').value,
+    scanner_ip: $('#scanner-ip').value.trim(),
+    resolution: $('#resolution').value,
+    color_mode: $('#color').value,
+    scan_source: document.querySelector('input[name="source"]:checked').value,
+    mode: currentMode,
+  };
+  fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings) }).catch(() => {});
+}
 
 function setMode(mode) {
   currentMode = mode;
@@ -963,7 +1040,14 @@ function setMode(mode) {
   $('#mode-desc').textContent = mode === 'auto'
     ? 'AI automatically classifies and saves the document.'
     : 'Scan and review AI suggestions before saving.';
+  saveSettings();
 }
+
+// Auto-save settings when inputs change
+['#output-dir','#scanner-ip','#resolution','#color'].forEach(s => {
+  const el = $(s); if (el) el.addEventListener('change', saveSettings);
+});
+document.querySelectorAll('input[name="source"]').forEach(r => r.addEventListener('change', saveSettings));
 
 function closeApiModal() { $('#api-key-modal').classList.remove('active'); }
 async function saveApiKey() {
@@ -984,7 +1068,7 @@ async function browseFolder() {
   try {
     const res = await fetch('/api/browse-folder', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({current: $('#output-dir').value}) });
     const data = await res.json();
-    if (data.ok) { $('#output-dir').value = data.path; }
+    if (data.ok) { $('#output-dir').value = data.path; saveSettings(); }
   } catch(e) {}
 }
 
@@ -1059,7 +1143,7 @@ async function connect() {
   try {
     const res = await fetch('/api/connect', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ip}) });
     const data = await res.json();
-    if (data.ok) { st.textContent = data.name + ' \u2014 ' + data.state; st.className = 'status connected'; $('#btn-classify').disabled = false; $('#btn-scan').disabled = false; $('#btn-batch').disabled = false; }
+    if (data.ok) { st.textContent = data.name + ' \u2014 ' + data.state; st.className = 'status connected'; $('#btn-classify').disabled = false; $('#btn-scan').disabled = false; $('#btn-batch').disabled = false; saveSettings(); }
     else { st.textContent = 'Error: ' + data.error; st.className = 'status error'; }
   } catch(e) { st.textContent = 'Failed: ' + e.message; st.className = 'status error'; }
   refreshLog();
