@@ -976,9 +976,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-fields input[type="text"] { padding: 8px 12px; font-size: 14px; font-family: var(--mono); border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; width: 100%; box-sizing: border-box; }
   .batch-fields input[type="text"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); box-shadow: var(--focus-ring); }
   .batch-tag-grid { display: flex; flex-wrap: wrap; gap: 6px; grid-column: 2; }
-  .batch-add-tag-row { display: flex; gap: 6px; grid-column: 2; margin-top: 4px; }
-  .batch-add-tag-row input[type="text"] { flex: 1; min-width: 0; width: auto; padding: 8px 12px; font-size: 14px; font-family: var(--font); border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; }
-  .batch-add-tag-row button { flex-shrink: 0; padding: 8px 14px; font-size: 13px; }
+  .batch-add-tag-row { display: flex; flex-direction: column; gap: 6px; grid-column: 2; margin-top: 6px; }
+  .batch-add-tag-row input[type="text"] { width: 100%; box-sizing: border-box; padding: 10px 14px; font-size: 14px; font-family: var(--font); border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; }
+  .batch-add-tag-row button { align-self: flex-start; padding: 8px 18px; font-size: 13px; }
   .batch-tag { padding: 6px 14px; border: 2px solid var(--border); border-radius: var(--radius); font-size: 14px; font-weight: 500; font-family: var(--font); cursor: pointer; background: #fff; color: #212529; transition: all var(--transition); }
   .batch-tag.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 600; }
   .batch-tag:hover { border-color: var(--primary); }
@@ -2062,6 +2062,15 @@ function renderBatchDocs() {
   const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
   const numDocs = batchData.length;
 
+  // Build short display names for each document
+  function docShortName(doc, idx) {
+    const fn = doc.filename || '';
+    // Strip .pdf, strip leading date (YYYY-MM-DD_), replace underscores with spaces, capitalize
+    let name = fn.replace(/\.pdf$/i, '').replace(/^\d{4}-\d{2}-\d{2}_/, '').replace(/_/g, ' ').trim();
+    if (name.length > 40) name = name.substring(0, 40) + '\u2026';
+    return name || ('Document ' + (idx + 1));
+  }
+
   batchData.forEach((doc, i) => {
     const card = document.createElement('div');
     card.className = 'batch-doc';
@@ -2077,7 +2086,7 @@ function renderBatchDocs() {
       const preview = allPreviews[pNum - 1] || '';
       let moveOpts = '';
       for (let d = 0; d < numDocs; d++) {
-        moveOpts += '<option value="' + d + '"' + (d === i ? ' selected' : '') + '>Doc ' + (d + 1) + '</option>';
+        moveOpts += '<option value="' + d + '"' + (d === i ? ' selected' : '') + '>' + esc(docShortName(batchData[d], d)) + '</option>';
       }
       moveOpts += '<option value="new">+ New doc</option>';
       pagesHtml += '<div class="batch-page" draggable="true" data-page="' + pNum + '" data-doc="' + i + '">' +
@@ -2104,7 +2113,7 @@ function renderBatchDocs() {
     card.innerHTML =
       '<div class="batch-doc-head">' +
         '<div class="batch-doc-title">' +
-          '<span class="batch-doc-label">Document ' + (i + 1) + (doc.summary ? ' \u2014 ' + esc(doc.summary) : '') + '</span>' +
+          '<span class="batch-doc-label">' + esc(docShortName(doc, i)) + (doc.summary ? ' \u2014 ' + esc(doc.summary) : '') + '</span>' +
           (pages.length === 0 ? '<button class="btn-remove-doc" onclick="removeBatchDoc(' + i + ')">Remove</button>' : '') +
         '</div>' +
       '</div>' +
