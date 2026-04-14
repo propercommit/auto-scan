@@ -508,7 +508,7 @@ def _run_scan_job(data: dict, mode: str):
             # Thumbnails for ALL pages so frontend can rearrange freely
             all_previews = []
             for img_data in images:
-                thumb = _make_thumbnail(img_data, max_dim=150)
+                thumb = _make_thumbnail(img_data, max_dim=300)
                 all_previews.append(base64.b64encode(thumb).decode("ascii"))
 
             docs = []
@@ -850,8 +850,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tag-btn.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 700; }
   .tag-btn.suggested { border-color: #9dc2f7; background: #edf3fc; color: var(--primary-text); }
   .add-tag-row { display: flex; gap: 6px; margin-top: 8px; }
-  .add-tag-row input { flex: 1; padding: 6px 10px; font-size: 13px; }
-  .btn-add-tag { flex-shrink: 0; padding: 6px 14px; width: auto; font-size: 13px; }
+  .add-tag-row input { flex: 1; padding: 8px 12px; font-size: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; }
+  .btn-add-tag { flex-shrink: 0; padding: 8px 14px; width: auto; font-size: 13px; }
   .classify-folder { margin-top: 14px; }
   .classify-folder input[type="text"] { font-family: var(--mono); font-size: 13px; }
   .field-hint { font-size: 12px; color: var(--gray-light); margin-top: 3px; }
@@ -877,12 +877,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-doc-title { font-size: 15px; font-weight: 700; color: #212529; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
   .batch-doc-title .batch-doc-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .batch-doc-summary { font-size: 14px; color: var(--gray); margin-bottom: 8px; }
-  .batch-page-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; min-height: 68px; padding: 8px; border: 2px dashed var(--border); border-radius: var(--radius); transition: border-color var(--transition), background var(--transition); }
+  .batch-page-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; min-height: 90px; padding: 10px; border: 2px dashed var(--border); border-radius: var(--radius); transition: border-color var(--transition), background var(--transition); }
   .batch-page-grid.drop-target { border-color: var(--primary); background: var(--primary-light); }
   .batch-page { width: 56px; text-align: center; position: relative; border-radius: 6px; transition: opacity var(--transition); cursor: grab; }
   .batch-page:active { cursor: grabbing; }
   .batch-page.dragging { opacity: .3; }
-  .batch-page img { width: 56px; height: 72px; object-fit: cover; border-radius: 4px; border: 2px solid var(--border); transition: border-color var(--transition); }
+  .batch-page img { width: 80px; height: 104px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); transition: border-color var(--transition); }
   .batch-page:hover img { border-color: var(--primary); }
   .batch-page span { display: block; font-size: 12px; color: var(--gray); margin-top: 2px; }
   .batch-page select { width: 100%; font-size: 11px; padding: 2px; border: 1px solid var(--border); border-radius: 3px; margin-top: 2px; cursor: pointer; }
@@ -910,8 +910,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-fields input { padding: 8px 12px; font-size: 14px; font-family: var(--mono); }
   .batch-tag-grid { display: flex; flex-wrap: wrap; gap: 6px; grid-column: 2; }
   .batch-add-tag-row { display: flex; gap: 6px; grid-column: 2; margin-top: 4px; }
-  .batch-add-tag-row input { flex: 1; padding: 6px 10px; font-size: 13px; font-family: var(--font); }
-  .batch-add-tag-row button { flex-shrink: 0; padding: 6px 14px; font-size: 13px; }
+  .batch-add-tag-row input { flex: 1; padding: 8px 12px; font-size: 14px; font-family: var(--font); border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; }
+  .batch-add-tag-row button { flex-shrink: 0; padding: 8px 14px; font-size: 13px; }
   .batch-tag { padding: 6px 14px; border: 2px solid var(--border); border-radius: var(--radius); font-size: 14px; font-weight: 500; font-family: var(--font); cursor: pointer; background: #fff; color: #212529; transition: all var(--transition); }
   .batch-tag.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 600; }
   .batch-tag:hover { border-color: var(--primary); }

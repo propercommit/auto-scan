@@ -67,6 +67,42 @@ def _resize_for_api(image_data: bytes, max_dim: int = 1568) -> bytes:
     return buf.getvalue()
 
 
+def _label_page(image_data: bytes, page_num: int, max_dim: int = 1568) -> bytes:
+    """Resize an image and burn a page-number label into the top-left corner."""
+    from PIL import ImageDraw, ImageFont
+
+    img = Image.open(io.BytesIO(image_data))
+    w, h = img.size
+    if w > max_dim or h > max_dim:
+        scale = max_dim / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+    # Ensure RGB for drawing
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    draw = ImageDraw.Draw(img)
+    label = f" PAGE {page_num} "
+    font_size = max(18, img.width // 30)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
+    except (OSError, IOError):
+        try:
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except (OSError, IOError):
+            font = ImageFont.load_default()
+
+    bbox = draw.textbbox((0, 0), label, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    margin = 8
+    draw.rectangle([margin, margin, margin + tw + 12, margin + th + 8], fill=(0, 0, 0))
+    draw.text((margin + 6, margin + 4), label, fill=(255, 255, 255), font=font)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
+
+
 def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     """Send scanned page images to Claude Vision for classification and naming."""
     check_rate_limit()
@@ -160,26 +196,42 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
 # ── Batch analysis ──────────────────────────────────────────────────
 
 BATCH_ANALYSIS_PROMPT = """\
-You are analyzing {num_pages} scanned pages that may come from MULTIPLE different documents, possibly interleaved/mixed together.
+You are a document sorting expert. You have {num_pages} scanned pages from a mixed stack. Pages from DIFFERENT documents may be shuffled together. Each image is labeled with its page number in the top-left corner.
 
-STEP 1 — GROUP PAGES BY DOCUMENT. This is the most critical step. Two pages belong to the SAME document ONLY if they share ALL of:
-- Same physical paper style, weight, color
-- Same font family, font size, text styling (bold, italic patterns)
-- Same page layout, margins, column structure
-- Same letterhead, logo, header/footer design
-- Same sender/author/organization
-- Consistent page numbering sequence (page 1/3, 2/3, 3/3)
-- Same visual "look and feel" overall
+═══ STEP 1: READ EVERY PAGE ═══
+For each page, identify:
+  a) Document TYPE visible in the title/header (e.g. "Insurance Policy", "Sales Agreement", "Invoice", "Bank Statement")
+  b) Company/organization name in the letterhead or header
+  c) Reference/policy/contract/invoice NUMBER
+  d) Page numbering if visible (e.g. "Page 2 of 4")
+  e) The TOPIC — what is this page actually about?
 
-Pages that discuss related topics but look visually different (different fonts, different letterheads, different layouts) are SEPARATE documents. A bank statement and a bank letter are two documents even though both are from the same bank — unless they share identical formatting. Prioritize visual/structural similarity over topical similarity.
+═══ STEP 2: GROUP BY DOCUMENT IDENTITY ═══
+Two pages belong to the SAME document ONLY when ALL of these match:
+  - Same document TYPE (an insurance policy ≠ a sales contract, even from the same company)
+  - Same reference/policy/contract number
+  - Same sender AND recipient pair
+  - Compatible page numbering (1,2,3 not 1,1)
+  - Same formatting and letterhead
 
-STEP 2 — Classify each group.
-Return ONLY valid JSON (no markdown) — an array:
+CRITICAL — these are ALWAYS separate documents:
+  ✗ An insurance document and a sales document → 2 docs, even if same company
+  ✗ A cover letter and the enclosed form → 2 docs
+  ✗ Different document types with different headers → separate
+  ✗ Pages about different topics or transactions → separate
+  ✗ A renewal notice and the original policy → 2 docs
+
+WHEN IN DOUBT → SPLIT. It is much better to over-split (too many small docs) than to wrongly merge pages from different documents.
+
+The CONTENT and DOCUMENT TYPE on the page is the strongest signal. Two pages that say "Insurance" in the header must be grouped under insurance, not sales — regardless of what other pages look like.
+
+═══ STEP 3: CLASSIFY AND OUTPUT ═══
+Return ONLY valid JSON (no markdown) — an array of document groups:
 
 [{{"pages": [1, 2], "category": "...", "filename": "YYYY-MM-DD_cat_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
 
 Categories: {categories}
-Pages numbered 1–{num_pages}. Every page in exactly one group. Date from doc or {today}. Lowercase underscores in filenames. Tags: 5-15 lowercase keywords. Filename: include entity names, amounts, ref numbers."""
+Pages numbered 1–{num_pages}. Every page must appear in exactly one group. Use the document date if visible, otherwise {today}. Filenames: lowercase underscores, include entity names, amounts, ref numbers. Tags: 5-15 lowercase keywords from the content."""
 
 
 def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], DocumentInfo]]:
@@ -196,10 +248,9 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
     client = anthropic.Anthropic(api_key=config.api_key, timeout=180.0)
 
     content: list[dict] = []
-    for img_data in images:
-        # Use smaller images for batch to reduce token cost
-        resized = _resize_for_api(img_data, max_dim=1200)
-        b64 = base64.standard_b64encode(resized).decode("ascii")
+    for i, img_data in enumerate(images):
+        labeled = _label_page(img_data, i + 1, max_dim=1568)
+        b64 = base64.standard_b64encode(labeled).decode("ascii")
         content.append({
             "type": "image",
             "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
@@ -218,6 +269,14 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
         message = client.messages.create(
             model=config.claude_model,
             max_tokens=4096,
+            system=(
+                "You are a professional document classification system. "
+                "READ the actual text content on every page — titles, headers, "
+                "document type labels, reference numbers. The text content is the "
+                "strongest signal for classification. A page whose header says "
+                "'Insurance' is an insurance document, never a sales document. "
+                "Always split different document types into separate groups."
+            ),
             messages=[{"role": "user", "content": content}],
         )
     except anthropic.APITimeoutError as e:
