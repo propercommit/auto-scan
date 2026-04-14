@@ -38,7 +38,10 @@ def check_status(client: ESCLClient, config: Config) -> ScannerStatus:
     return status
 
 
-def run_scan(config: Config, classify: bool = True, dry_run: bool = False) -> Path | None:
+def run_scan(
+    config: Config, classify: bool = True, dry_run: bool = False,
+    redact: bool = True,
+) -> Path | None:
     """Full pipeline: discover scanner, scan, analyze, save.
 
     Returns the output file path, or None for dry-run.
@@ -65,7 +68,9 @@ def run_scan(config: Config, classify: bool = True, dry_run: bool = False) -> Pa
             return None
         return save_unclassified(images, config)
 
-    doc_info = analyze_document(images, config)
+    if redact:
+        print("Running local OCR redaction before sending to AI...", file=sys.stderr)
+    doc_info = analyze_document(images, config, redact=redact)
 
     if dry_run:
         print("\nDry run — would save as:", file=sys.stderr)

@@ -37,6 +37,20 @@ def main() -> None:
         help="override output directory",
     )
 
+    # Privacy options
+    redact_group = parser.add_mutually_exclusive_group()
+    redact_group.add_argument(
+        "--redact",
+        action="store_true",
+        default=True,
+        help="redact sensitive data before sending to AI (default)",
+    )
+    redact_group.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="skip redaction — send original images to AI",
+    )
+
     # Mode flags
     parser.add_argument(
         "--no-classify",
@@ -80,10 +94,12 @@ def main() -> None:
         elif args.status:
             show_status(config)
         else:
+            redact = not args.no_redact
             result = run_scan(
                 config,
                 classify=not args.no_classify,
                 dry_run=args.dry_run,
+                redact=redact,
             )
             if result:
                 print(f"\n{result}")

@@ -478,6 +478,7 @@ def analyze_batch(
         print(f"  {len(uncertain_pages)} uncertain page(s) (confidence < {CONFIDENCE_THRESHOLD}%), running verification...", file=sys.stderr)
         results = _verify_uncertain_pages(
             images, results, uncertain_pages, content, config, client,
+            redact=redact, redact_patterns=redact_patterns,
         )
 
     print(f"Detected {len(results)} document(s)", file=sys.stderr)
@@ -536,6 +537,8 @@ def _verify_uncertain_pages(
     original_content: list[dict],
     config: Config,
     client: anthropic.Anthropic,
+    redact: bool = False,
+    redact_patterns: set[str] | None = None,
 ) -> list[tuple[list[int], DocumentInfo]]:
     """Re-analyze uncertain pages with a verification model."""
 
@@ -555,10 +558,11 @@ def _verify_uncertain_pages(
         initial_grouping="\n".join(grouping_lines),
     )
 
-    # Send only the uncertain page images + context
+    # Send only the uncertain page images + context (redacted if enabled)
     verify_content: list[dict] = []
     for p in uncertain_pages:
-        labeled = _label_page(images[p - 1], p, max_dim=1568)
+        safe_img = _maybe_redact(images[p - 1], redact, redact_patterns)
+        labeled = _label_page(safe_img, p, max_dim=1568)
         b64 = base64.standard_b64encode(labeled).decode("ascii")
         verify_content.append({
             "type": "image",

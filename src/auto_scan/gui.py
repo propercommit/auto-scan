@@ -693,7 +693,7 @@ def _run_scan_job(data: dict, mode: str):
             with _state_lock:
                 state["job"]["status"] = "analyzing"
             _log("Analyzing with Claude Vision...")
-            doc_info = analyze_document(images, config)
+            doc_info = analyze_document(images, config, redact=redact, redact_patterns=redact_pats)
             _log(f"AI suggests: {doc_info.category}")
 
             thumb = _make_thumbnail(images[0])
