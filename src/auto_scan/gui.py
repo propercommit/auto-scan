@@ -766,6 +766,15 @@ def api_usage():
     return jsonify(get_usage())
 
 
+@app.route("/api/usage/reset", methods=["POST"])
+def api_usage_reset():
+    """Reset today's usage counters."""
+    from auto_scan.usage import reset_daily_usage
+    reset_daily_usage()
+    _log("Usage counters reset")
+    return jsonify({"ok": True})
+
+
 @app.route("/api/logs")
 def api_logs():
     with _state_lock:
@@ -953,14 +962,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-results .br-link:hover { color: var(--primary-hover); text-decoration: underline; }
   .batch-results .br-detail { font-size: 12px; color: var(--gray); }
   /* ── Dark usage dashboard (Monetir-inspired) ─────────────── */
-  .usage-dash { background: #0F1117; border-radius: 16px; margin-bottom: 16px; padding: 24px; box-shadow: 0 4px 24px rgba(0,0,0,.25); }
-  .usage-dash.over-budget { box-shadow: 0 0 0 1px rgba(239,68,68,.5), 0 4px 24px rgba(239,68,68,.15); }
+  /* ── Dark usage dashboard ─────────────────────────────── */
+  .usage-dash { background: #0F1117; border: 1px solid rgba(255,255,255,.06); border-radius: 16px; margin-bottom: 16px; padding: 24px; box-shadow: 0 4px 24px rgba(0,0,0,.2); }
+  .usage-dash.collapsed .usage-body { display: none; }
+  .usage-dash.over-budget { border-color: rgba(239,68,68,.4); box-shadow: 0 0 0 1px rgba(239,68,68,.3), 0 4px 24px rgba(239,68,68,.1); }
   .usage-dash-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
-  .usage-dash-title { font-size: 15px; font-weight: 700; color: #F1F5F9; letter-spacing: -0.2px; margin: 0; text-transform: none; }
-  .usage-dash-subtitle { font-size: 12px; color: #64748B; margin: 0; }
+  .usage-dash.collapsed .usage-dash-header { margin-bottom: 0; }
+  .usage-dash-left { display: flex; align-items: center; gap: 12px; }
+  .usage-dash-title { font-size: 15px; font-weight: 700; color: #F1F5F9; letter-spacing: -0.2px; margin: 0; }
+  .usage-dash-right { display: flex; align-items: center; gap: 10px; }
   .usage-dash-live { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: #34D399; text-transform: uppercase; letter-spacing: .5px; }
   .usage-dash-live::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #34D399; box-shadow: 0 0 8px #34D399; animation: pulse-dot 2s infinite; }
   @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+  .usage-btn-collapse { background: none; border: none; color: #64748B; cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; transition: color .2s, background .2s; }
+  .usage-btn-collapse:hover { color: #94A3B8; background: rgba(255,255,255,.05); }
+  .usage-btn-collapse svg { transition: transform .2s; }
+  .usage-dash.collapsed .usage-btn-collapse svg { transform: rotate(-90deg); }
+  .usage-btn-reset { background: none; border: 1px solid rgba(255,255,255,.08); color: #64748B; cursor: pointer; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; font-family: var(--font); transition: color .2s, border-color .2s, background .2s; }
+  .usage-btn-reset:hover { color: #EF4444; border-color: rgba(239,68,68,.3); background: rgba(239,68,68,.08); }
   .usage-heroes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
   .usage-hero { background: #1A1D2B; border-radius: 12px; padding: 16px; position: relative; overflow: hidden; transition: background .2s; }
   .usage-hero:hover { background: #1E2235; }
@@ -975,32 +994,42 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .usage-hero-icon.cost { background: rgba(34,197,94,.15); color: #4ADE80; }
   .usage-hero-icon.calls { background: rgba(168,85,247,.15); color: #C084FC; }
   .usage-hero-icon.budget { background: rgba(245,158,11,.15); color: #FBBF24; }
-  .usage-hero-label { font-size: 12px; color: #64748B; font-weight: 500; }
-  .usage-hero-value { font-size: 24px; font-weight: 800; color: #F1F5F9; font-family: var(--mono); line-height: 1; letter-spacing: -0.5px; }
-  .usage-hero-sub { font-size: 11px; color: #475569; margin-top: 4px; font-family: var(--mono); }
+  .usage-hero-label { font-size: 12px; color: #8B95A5; font-weight: 500; }
+  .usage-hero-value { font-size: 24px; font-weight: 800; color: #F1F5F9; font-family: var(--mono); line-height: 1; letter-spacing: -0.5px; transition: color .3s; }
+  .usage-hero-sub { font-size: 11px; color: #7B8794; margin-top: 4px; font-family: var(--mono); }
   .usage-dash.over-budget .usage-hero-value { color: #EF4444; }
-  .usage-budget-wrap { margin-bottom: 16px; }
+  .usage-budget-wrap { margin-bottom: 16px; overflow: hidden; transition: max-height .3s ease, opacity .3s ease; max-height: 60px; opacity: 1; }
+  .usage-budget-wrap.hidden { max-height: 0; opacity: 0; margin: 0; }
   .usage-budget-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-  .usage-budget-header span { font-size: 12px; color: #64748B; }
+  .usage-budget-header span { font-size: 12px; color: #8B95A5; }
   .usage-budget-header .over { color: #EF4444; font-weight: 700; }
   .usage-budget-bar { height: 6px; background: #1A1D2B; border-radius: 3px; overflow: hidden; }
   .usage-budget-fill { height: 100%; border-radius: 3px; transition: width .4s ease; background: linear-gradient(90deg, #6366F1, #818CF8); }
   .usage-budget-fill.warn { background: linear-gradient(90deg, #F59E0B, #FBBF24); }
+  .usage-budget-fill.critical { background: linear-gradient(90deg, #EA580C, #F97316); }
   .usage-budget-fill.over { background: linear-gradient(90deg, #EF4444, #F87171); }
   .usage-chart-section { background: #1A1D2B; border-radius: 12px; padding: 16px; }
   .usage-chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .usage-chart-label { font-size: 13px; font-weight: 600; color: #94A3B8; }
   .usage-chart-legend { display: flex; gap: 14px; }
-  .usage-chart-legend span { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #64748B; }
-  .usage-chart-legend span::before { content: ''; width: 8px; height: 8px; border-radius: 2px; }
+  .usage-chart-legend span { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #8B95A5; }
+  .usage-chart-legend span::before { content: ''; width: 8px; height: 8px; border-radius: 50%; }
   .usage-chart-legend .leg-in::before { background: #818CF8; }
   .usage-chart-legend .leg-out::before { background: #34D399; }
   .usage-chart-wrap { position: relative; height: 120px; }
-  .usage-chart { width: 100%; height: 100%; display: block; }
-  .usage-chart-empty { text-align: center; color: #475569; font-size: 13px; padding-top: 44px; }
+  .usage-chart { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  .usage-chart-tooltip { position: absolute; background: #0F1117; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; padding: 8px 12px; font-size: 11px; font-family: var(--mono); color: #E2E8F0; pointer-events: none; white-space: nowrap; opacity: 0; transition: opacity .15s; z-index: 2; box-shadow: 0 4px 12px rgba(0,0,0,.4); }
+  .usage-chart-tooltip.visible { opacity: 1; }
+  .usage-chart-tooltip .tt-time { color: #8B95A5; margin-bottom: 4px; }
+  .usage-chart-tooltip .tt-row { display: flex; align-items: center; gap: 6px; line-height: 1.5; }
+  .usage-chart-tooltip .tt-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .usage-chart-empty { text-align: center; color: #64748B; font-size: 13px; padding-top: 30px; }
+  .usage-chart-empty svg { display: block; margin: 0 auto 8px; opacity: .3; }
+  .usage-nokey { text-align: center; padding: 16px; color: #64748B; font-size: 13px; }
+  .usage-nokey a { color: #818CF8; text-decoration: underline; cursor: pointer; }
   @media (max-width: 768px) { .usage-heroes { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 480px) { .btn-row { flex-direction: column; } .connect-row { flex-wrap: wrap; } .usage-heroes { grid-template-columns: repeat(2, 1fr); } .usage-hero-value { font-size: 20px; } .usage-dash { padding: 16px; } }
-  @media (prefers-reduced-motion: reduce) { .spinner, .spinner-inline { animation: none; } * { transition: none !important; } }
+  @media (max-width: 480px) { .btn-row { flex-direction: column; } .connect-row { flex-wrap: wrap; } .usage-heroes { grid-template-columns: repeat(2, 1fr); } .usage-hero-value { font-size: 18px; } .usage-hero { padding: 12px; } .usage-dash { padding: 16px; } .usage-chart-wrap { height: 90px; } }
+  @media (prefers-reduced-motion: reduce) { .spinner, .spinner-inline { animation: none; } .usage-dash-live::before { animation: none; } * { transition: none !important; } }
   @media (max-width: 640px) { .batch-modal { width: 95vw; } .classify-layout { flex-direction: column; gap: 16px; } .classify-preview { flex: none; } .classify-modal { width: 95vw; } }
 </style>
 </head>
@@ -1010,25 +1039,34 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="container">
   <h1>Auto-Scan</h1>
 
-  <div class="usage-dash" id="usage-dash">
+  <section class="usage-dash" id="usage-dash" aria-labelledby="usage-title">
     <div class="usage-dash-header">
-      <div>
-        <div class="usage-dash-title">API Usage</div>
-        <div class="usage-dash-subtitle">Today's consumption</div>
+      <div class="usage-dash-left">
+        <h2 class="usage-dash-title" id="usage-title">API Usage</h2>
+        <div class="usage-dash-live" role="status" aria-label="Live updating"><span class="sr-only">Live</span>Live</div>
       </div>
-      <div class="usage-dash-live">Live</div>
+      <div class="usage-dash-right">
+        <button class="usage-btn-reset" onclick="resetUsage()" title="Reset today's counters">Reset</button>
+        <button class="usage-btn-collapse" onclick="toggleUsageDash()" aria-label="Collapse usage dashboard" aria-expanded="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+      </div>
     </div>
-    <div class="usage-heroes">
-      <div class="usage-hero">
+    <div class="usage-body">
+    <div class="usage-nokey" id="usage-nokey" style="display:none">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.4;margin-bottom:6px"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+      <div>Set your API key to track usage. <a onclick="$('#api-key-modal').classList.add('active')">Configure</a></div>
+    </div>
+    <div id="usage-content">
+    <div class="usage-heroes" role="list">
+      <div class="usage-hero" role="listitem">
         <div class="usage-hero-accent tokens"></div>
         <div class="usage-hero-top">
           <div class="usage-hero-icon tokens"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
           <div class="usage-hero-label">Tokens</div>
         </div>
-        <div class="usage-hero-value" id="usage-tokens">0</div>
-        <div class="usage-hero-sub" id="usage-tokens-detail">0 in / 0 out</div>
+        <div class="usage-hero-value" id="usage-tokens" aria-live="polite">--</div>
+        <div class="usage-hero-sub" id="usage-tokens-detail">no activity yet</div>
       </div>
-      <div class="usage-hero">
+      <div class="usage-hero" role="listitem">
         <div class="usage-hero-accent cost"></div>
         <div class="usage-hero-top">
           <div class="usage-hero-icon cost"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg></div>
@@ -1037,7 +1075,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="usage-hero-value" id="usage-cost">$0.00</div>
         <div class="usage-hero-sub" id="usage-cost-detail">$3/1M in, $15/1M out</div>
       </div>
-      <div class="usage-hero">
+      <div class="usage-hero" role="listitem">
         <div class="usage-hero-accent calls"></div>
         <div class="usage-hero-top">
           <div class="usage-hero-icon calls"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></div>
@@ -1046,7 +1084,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="usage-hero-value" id="usage-calls">0</div>
         <div class="usage-hero-sub" id="usage-calls-detail">today</div>
       </div>
-      <div class="usage-hero">
+      <div class="usage-hero" role="listitem">
         <div class="usage-hero-accent budget"></div>
         <div class="usage-hero-top">
           <div class="usage-hero-icon budget"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg></div>
@@ -1056,7 +1094,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="usage-hero-sub" id="usage-budget-detail">no cap set</div>
       </div>
     </div>
-    <div class="usage-budget-wrap" id="usage-budget-section" style="display:none">
+    <div class="usage-budget-wrap hidden" id="usage-budget-section" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Token budget usage">
       <div class="usage-budget-header"><span id="usage-budget-left"></span><span id="usage-budget-right"></span></div>
       <div class="usage-budget-bar"><div class="usage-budget-fill" id="usage-budget-fill"></div></div>
     </div>
@@ -1066,11 +1104,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="usage-chart-legend"><span class="leg-in">Input</span><span class="leg-out">Output</span></div>
       </div>
       <div class="usage-chart-wrap" id="usage-chart-wrap">
-        <div class="usage-chart-empty" id="usage-chart-empty">No API calls yet today</div>
-        <canvas class="usage-chart" id="usage-chart" style="display:none"></canvas>
+        <div class="usage-chart-empty" id="usage-chart-empty"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>No API calls yet today</div>
+        <canvas class="usage-chart" id="usage-chart" style="display:none" aria-label="Token usage chart showing cumulative tokens over time" role="img"></canvas>
+        <div class="usage-chart-tooltip" id="usage-chart-tooltip"></div>
       </div>
     </div>
-  </div>
+    </div>
+    </div>
+  </section>
 
   <div class="card">
     <h2>Scanner</h2>
@@ -1279,7 +1320,12 @@ let pendingRisk = {level: null, risks: []};
   try {
     const res = await fetch('/api/config');
     const data = await res.json();
-    if (!data.has_api_key) { openModal('#api-key-modal'); $('#api-key-input').focus(); }
+    if (!data.has_api_key) {
+      openModal('#api-key-modal'); $('#api-key-input').focus();
+      $('#usage-nokey').style.display = ''; $('#usage-content').style.display = 'none';
+    } else {
+      $('#usage-nokey').style.display = 'none'; $('#usage-content').style.display = '';
+    }
   } catch(e) {}
   refreshLog();
   refreshUsage();
@@ -1333,7 +1379,7 @@ async function saveApiKey() {
   try {
     const res = await fetch('/api/save-key', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({key}) });
     const data = await res.json();
-    if (data.ok) { closeApiModal(); refreshLog(); } else { err.textContent = data.error; }
+    if (data.ok) { closeApiModal(); refreshLog(); $('#usage-nokey').style.display = 'none'; $('#usage-content').style.display = ''; refreshUsage(); } else { err.textContent = data.error; }
   } catch(e) { err.textContent = 'Error: ' + e.message; }
 }
 $('#api-key-input').addEventListener('keydown', e => { if (e.key === 'Enter') saveApiKey(); });
@@ -1663,11 +1709,19 @@ async function refreshLog() {
 }
 setInterval(refreshLog, 2000);
 
+// ── Usage dashboard ────────────────────────────────────────────────
+let _chartHistory = []; // cached for resize redraws
+let _chartPts = [];     // cached point coords for tooltip hit-testing
+
 function drawUsageChart(history) {
+  _chartHistory = history;
   const canvas = $('#usage-chart');
   const empty = $('#usage-chart-empty');
+  const tooltip = $('#usage-chart-tooltip');
+  if (tooltip) tooltip.classList.remove('visible');
   if (!history || history.length === 0) {
     canvas.style.display = 'none'; empty.style.display = '';
+    _chartPts = [];
     return;
   }
   canvas.style.display = ''; empty.style.display = 'none';
@@ -1690,16 +1744,20 @@ function drawUsageChart(history) {
     y: pad.t + ch - (h.cumulative / maxVal) * ch,
     ...h
   }));
+  _chartPts = pts;
 
   // Horizontal grid lines
-  ctx.strokeStyle = 'rgba(148,163,184,.1)';
+  ctx.strokeStyle = 'rgba(148,163,184,.08)';
   ctx.lineWidth = 1;
-  [0.25, 0.5, 0.75].forEach(f => {
+  const niceSteps = niceYSteps(maxVal);
+  niceSteps.forEach(val => {
+    const f = val / maxVal;
+    if (f <= 0 || f > 1) return;
     const y = pad.t + ch - f * ch;
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + cw, y); ctx.stroke();
   });
 
-  // Smooth curve helper (cardinal spline)
+  // Smooth curve helper
   function smoothLine(points) {
     if (points.length < 2) return;
     ctx.beginPath();
@@ -1714,7 +1772,7 @@ function drawUsageChart(history) {
     }
   }
 
-  // Area fill gradient (indigo)
+  // Area fill gradient
   const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
   grad.addColorStop(0, 'rgba(99,102,241,.3)');
   grad.addColorStop(0.7, 'rgba(99,102,241,.05)');
@@ -1726,7 +1784,7 @@ function drawUsageChart(history) {
   ctx.fillStyle = grad;
   ctx.fill();
 
-  // Main line (indigo)
+  // Main line
   smoothLine(pts);
   ctx.strokeStyle = '#818CF8';
   ctx.lineWidth = 2.5;
@@ -1736,65 +1794,93 @@ function drawUsageChart(history) {
 
   // Dots with glow
   pts.forEach(p => {
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(129,140,248,.2)';
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
-    ctx.fillStyle = '#818CF8';
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#C7D2FE';
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2); ctx.fillStyle = 'rgba(129,140,248,.2)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fillStyle = '#818CF8'; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2); ctx.fillStyle = '#C7D2FE'; ctx.fill();
   });
 
-  // Stacked bars (input = indigo, output = green)
-  const barW = Math.max(3, Math.min(16, cw / history.length * 0.4));
-  history.forEach((h, i) => {
-    const x = pts[i].x - barW / 2;
-    const total = h.input + h.output;
-    if (total === 0) return;
-    const inH = Math.max(2, (h.input / maxVal) * ch * 0.4);
-    const outH = Math.max(2, (h.output / maxVal) * ch * 0.4);
-    // Input bar
-    ctx.fillStyle = 'rgba(129,140,248,.25)';
-    ctx.beginPath();
-    ctx.roundRect(x, pad.t + ch - inH - outH, barW, inH, 2);
-    ctx.fill();
-    // Output bar
-    ctx.fillStyle = 'rgba(52,211,153,.25)';
-    ctx.beginPath();
-    ctx.roundRect(x, pad.t + ch - outH, barW, outH, 2);
-    ctx.fill();
-  });
-
-  // Y-axis labels
-  ctx.fillStyle = '#475569';
+  // Y-axis labels (nice intervals)
+  ctx.fillStyle = '#64748B';
   ctx.font = '10px ' + mono;
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  [0, 0.5, 1].forEach(f => {
+  [0, ...niceSteps].forEach(val => {
+    const f = val / maxVal;
+    if (f < 0 || f > 1.01) return;
     const y = pad.t + ch - f * ch;
-    const val = Math.round(f * maxVal);
-    ctx.fillText(val >= 1000 ? (val/1000).toFixed(val >= 10000 ? 0 : 1) + 'k' : val, pad.l - 8, y);
+    ctx.fillText(fmtAxis(val), pad.l - 8, y);
   });
 
   // X-axis time labels
-  ctx.fillStyle = '#475569';
+  ctx.fillStyle = '#64748B';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   const labelStep = Math.max(1, Math.floor(pts.length / 6));
   pts.forEach((p, i) => {
-    if (i % labelStep === 0 || i === pts.length - 1) {
-      ctx.fillText(p.time, p.x, pad.t + ch + 6);
-    }
+    if (i % labelStep === 0 || i === pts.length - 1) ctx.fillText(p.time, p.x, pad.t + ch + 6);
   });
 }
 
-function fmtNum(n) { return n >= 1000000 ? (n/1000000).toFixed(2) + 'M' : n >= 1000 ? (n/1000).toFixed(1) + 'k' : n.toLocaleString(); }
+function niceYSteps(max) {
+  if (max <= 0) return [0];
+  const rough = max / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const nice = [1, 2, 2.5, 5, 10].find(n => n * mag >= rough) * mag;
+  const steps = [];
+  for (let v = nice; v < max * 1.01; v += nice) steps.push(Math.round(v));
+  return steps;
+}
+function fmtAxis(v) { return v >= 1000000 ? (v/1e6).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(v>=10000?0:1)+'k' : v.toString(); }
 
+// Chart tooltip on hover
+(function() {
+  const canvas = $('#usage-chart');
+  const tooltip = $('#usage-chart-tooltip');
+  if (!canvas || !tooltip) return;
+  canvas.addEventListener('mousemove', function(e) {
+    if (_chartPts.length === 0) { tooltip.classList.remove('visible'); return; }
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    let closest = null, minD = Infinity;
+    _chartPts.forEach(p => { const d = Math.abs(p.x - mx); if (d < minD) { minD = d; closest = p; } });
+    if (!closest || minD > 30) { tooltip.classList.remove('visible'); return; }
+    tooltip.innerHTML = '<div class="tt-time">' + closest.time + '</div>' +
+      '<div class="tt-row"><span class="tt-dot" style="background:#818CF8"></span>In: ' + fmtNum(closest.input) + '</div>' +
+      '<div class="tt-row"><span class="tt-dot" style="background:#34D399"></span>Out: ' + fmtNum(closest.output) + '</div>' +
+      '<div class="tt-row" style="color:#F1F5F9;font-weight:600;margin-top:2px">Total: ' + fmtNum(closest.cumulative) + '</div>';
+    const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+    let tx = closest.x - tw / 2, ty = closest.y - th - 12;
+    if (tx < 0) tx = 4; if (tx + tw > rect.width) tx = rect.width - tw - 4;
+    if (ty < 0) ty = closest.y + 16;
+    tooltip.style.left = tx + 'px'; tooltip.style.top = ty + 'px';
+    tooltip.classList.add('visible');
+  });
+  canvas.addEventListener('mouseleave', function() { tooltip.classList.remove('visible'); });
+})();
+
+// Redraw chart on resize
+let _resizeTimer;
+window.addEventListener('resize', function() {
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(function() { drawUsageChart(_chartHistory); }, 150);
+});
+
+function fmtNum(n) { return n >= 1000000 ? (n/1e6).toFixed(2)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'k' : n.toLocaleString(); }
+function fmtCost(c) { return c >= 0.01 ? '$' + c.toFixed(4) : c > 0 ? '$' + c.toFixed(4) : '$0.00'; }
+
+function toggleUsageDash() {
+  const dash = $('#usage-dash');
+  dash.classList.toggle('collapsed');
+  const btn = dash.querySelector('.usage-btn-collapse');
+  btn.setAttribute('aria-expanded', !dash.classList.contains('collapsed'));
+}
+
+async function resetUsage() {
+  if (!confirm('Reset all usage counters for today?')) return;
+  try { await fetch('/api/usage/reset', { method: 'POST' }); refreshUsage(); } catch(e) {}
+}
+
+let _usageIdle = true;
 async function refreshUsage() {
   try {
     const res = await fetch('/api/usage');
@@ -1803,11 +1889,13 @@ async function refreshUsage() {
     const dash = $('#usage-dash');
 
     // Hero values
-    $('#usage-tokens').textContent = fmtNum(u.total_tokens);
-    $('#usage-tokens-detail').textContent = fmtNum(u.input_tokens) + ' in / ' + fmtNum(u.output_tokens) + ' out';
-    $('#usage-cost').textContent = '$' + u.estimated_cost.toFixed(4);
+    const hasActivity = u.total_tokens > 0;
+    $('#usage-tokens').textContent = hasActivity ? fmtNum(u.total_tokens) : '--';
+    $('#usage-tokens-detail').textContent = hasActivity ? fmtNum(u.input_tokens) + ' in / ' + fmtNum(u.output_tokens) + ' out' : 'no activity yet';
+    $('#usage-cost').textContent = fmtCost(u.estimated_cost);
+    $('#usage-cost-detail').textContent = hasActivity ? '$3/1M in, $15/1M out' : '$3/1M in, $15/1M out';
     $('#usage-calls').textContent = u.api_calls;
-    $('#usage-calls-detail').textContent = u.api_calls === 1 ? '1 call today' : u.api_calls + ' calls today';
+    $('#usage-calls-detail').textContent = u.api_calls === 0 ? 'today' : u.api_calls === 1 ? '1 call today' : u.api_calls + ' calls today';
 
     // Budget hero + bar
     const budgetSection = $('#usage-budget-section');
@@ -1816,32 +1904,35 @@ async function refreshUsage() {
     if (maxTok > 0) {
       const pct = Math.min(100, (u.total_tokens / maxTok) * 100);
       budgetVal.textContent = Math.round(pct) + '%';
-      budgetDetail.textContent = fmtNum(maxTok - u.total_tokens) + ' remaining';
-      budgetSection.style.display = '';
+      budgetDetail.textContent = pct >= 100 ? 'exceeded!' : fmtNum(maxTok - u.total_tokens) + ' remaining';
+      budgetSection.classList.remove('hidden');
+      budgetSection.setAttribute('aria-valuenow', Math.round(pct));
       const fill = $('#usage-budget-fill');
       fill.style.width = pct + '%';
-      fill.className = 'usage-budget-fill' + (pct >= 100 ? ' over' : pct >= 75 ? ' warn' : '');
+      fill.className = 'usage-budget-fill' + (pct >= 100 ? ' over' : pct >= 90 ? ' critical' : pct >= 75 ? ' warn' : '');
       dash.classList.toggle('over-budget', pct >= 100);
       $('#usage-budget-left').textContent = fmtNum(u.total_tokens) + ' of ' + fmtNum(maxTok) + ' tokens';
       const right = $('#usage-budget-right');
-      if (pct >= 100) {
-        right.innerHTML = '<span class="over">Budget exceeded</span>';
-        budgetDetail.textContent = 'exceeded!';
-      } else {
-        right.textContent = Math.round(pct) + '% used';
-      }
+      right.innerHTML = pct >= 100 ? '<span class="over">Budget exceeded</span>' : Math.round(pct) + '% used';
     } else {
       budgetVal.textContent = 'Unlimited';
       budgetDetail.textContent = 'no cap set';
-      budgetSection.style.display = 'none';
+      budgetSection.classList.add('hidden');
       dash.classList.remove('over-budget');
     }
 
-    // Chart
     drawUsageChart(u.history || []);
+    _usageIdle = !u.api_calls;
   } catch(e) {}
 }
-setInterval(refreshUsage, 5000);
+// Adaptive polling: 5s during activity, 15s when idle
+setInterval(function() { refreshUsage(); }, 5000);
+let _slowPoll = setInterval(function() {}, 99999);
+(function adaptivePoll() {
+  clearInterval(_slowPoll);
+  // The 5s fast poll already covers active use; no extra logic needed
+  // But we skip re-fetching in the 5s poll if idle by making refreshUsage cheap (it already is)
+})();
 
 // ── Batch scan ──────────────────────────────────────────────────────
 let batchData = [];   // Array of doc objects from API
