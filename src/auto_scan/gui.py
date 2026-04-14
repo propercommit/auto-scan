@@ -290,6 +290,35 @@ def api_disconnect():
     return jsonify({"ok": True})
 
 
+@app.route("/api/reveal", methods=["POST"])
+def api_reveal():
+    """Reveal a file in the OS file manager (Finder on macOS, Explorer on Windows)."""
+    import platform
+    import subprocess
+
+    data = request.get_json(silent=True) or {}
+    file_path = data.get("path", "")
+    if not file_path:
+        return jsonify({"ok": False, "error": "No path provided"}), 400
+
+    path = Path(file_path)
+    if not path.exists():
+        return jsonify({"ok": False, "error": "File not found"}), 404
+
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        elif system == "Windows":
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        else:
+            # Linux: open the containing folder
+            subprocess.Popen(["xdg-open", str(path.parent)])
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 def _do_scan(data: dict) -> tuple[list[bytes], Config]:
     """Common scan logic: connect, check status, scan, return images + config."""
     source = data.get("source", "Feeder")
@@ -919,7 +948,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-results { list-style: none; padding: 0; }
   .batch-results li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
   .batch-results li:last-child { border-bottom: none; }
-  .batch-results .br-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .batch-results .br-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+  .batch-results .br-link { color: var(--primary); text-decoration: none; cursor: pointer; transition: color var(--transition); }
+  .batch-results .br-link:hover { color: var(--primary-hover); text-decoration: underline; }
   .batch-results .br-detail { font-size: 12px; color: var(--gray); }
   /* ── Dark usage dashboard (Monetir-inspired) ─────────────── */
   .usage-dash { background: #0F1117; border-radius: 16px; margin-bottom: 16px; padding: 24px; box-shadow: 0 4px 24px rgba(0,0,0,.25); }
@@ -1509,8 +1540,16 @@ function showResult({folder, tags, filename, summary, date, path, riskLevel, ris
   $('#r-filename').textContent = filename || '--';
   $('#r-summary').textContent = summary || '--';
   $('#r-date').textContent = date || '--';
-  $('#r-path').textContent = 'Saved to: ' + path;
-  $('#r-path').style.display = '';
+  const pathEl = $('#r-path');
+  pathEl.innerHTML = '';
+  const pathLink = document.createElement('a');
+  pathLink.href = '#';
+  pathLink.textContent = 'Saved to: ' + path;
+  pathLink.title = 'Reveal in file manager';
+  pathLink.style.cssText = 'color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer;';
+  pathLink.onclick = function(e) { e.preventDefault(); revealFile(path); };
+  pathEl.appendChild(pathLink);
+  pathEl.style.display = '';
   renderRisk($('#r-risk'), riskLevel, risks);
 }
 
@@ -1828,6 +1867,10 @@ async function doBatchScan() {
   setBusy(false); refreshLog();
 }
 
+function revealFile(path) {
+  fetch('/api/reveal', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path}) }).catch(() => {});
+}
+
 function showBatchResults(docs) {
   const card = $('#batch-results-card');
   card.style.display = '';
@@ -1839,7 +1882,8 @@ function showBatchResults(docs) {
     const li = document.createElement('li');
     const name = doc.filename || (doc.output_path || '').split(/[/\\]/).pop() || 'document';
     const detail = [doc.folder || doc.category, doc.summary].filter(Boolean).join(' \u2014 ');
-    li.innerHTML = '<span class="br-name">' + esc(name) + '</span>' + (detail ? '<br><span class="br-detail">' + esc(detail) + '</span>' : '');
+    const path = doc.output_path || '';
+    li.innerHTML = '<a class="br-name br-link" href="#" title="Reveal in file manager" onclick="revealFile(\'' + esc(path).replace(/'/g, "\\'") + '\'); return false;">' + esc(name) + ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;opacity:.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>' + (detail ? '<br><span class="br-detail">' + esc(detail) + '</span>' : '');
     list.appendChild(li);
   });
 }
