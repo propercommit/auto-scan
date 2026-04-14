@@ -849,6 +849,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .results-grid { display: grid; grid-template-columns: 100px 1fr; gap: 4px 12px; font-size: 14px; }
   .results-grid dt { font-weight: 600; color: var(--gray); }
   .results-grid dd { color: #212529; word-break: break-word; }
+  .log-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .log-header h2 { margin-bottom: 0; }
+  .log-copy-btn { display: inline-flex; align-items: center; gap: 5px; background: none; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 600; font-family: var(--font); color: var(--gray-light); cursor: pointer; transition: color var(--transition), border-color var(--transition), background var(--transition); }
+  .log-copy-btn:hover { color: var(--gray); border-color: var(--gray); background: var(--bg); }
+  .log-copy-btn.copied { color: var(--green); border-color: var(--green); }
   .log { background: #1a1a2e; color: #e0e0e0; border-radius: var(--radius); padding: 12px; font-family: var(--mono); font-size: 13px; height: 160px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .spinner { display: none; width: 18px; height: 18px; border: 2px solid #fff4; border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; margin-right: 8px; }
   .spinner-inline { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(0,0,0,.15); border-top-color: var(--primary); border-radius: 50%; animation: spin .6s linear infinite; margin-right: 6px; vertical-align: middle; }
@@ -1210,7 +1215,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>Activity Log</h2>
+    <div class="log-header"><h2>Activity Log</h2><button class="log-copy-btn" id="log-copy-btn" onclick="copyLogs()" title="Copy logs to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg><span id="log-copy-label">Copy</span></button></div>
     <div class="log" id="log" role="log" aria-live="polite" aria-label="Activity log"></div>
   </div>
 </div>
@@ -1708,6 +1713,18 @@ async function refreshLog() {
   try { const res = await fetch('/api/logs'); const logs = await res.json(); const el = $('#log'); el.textContent = logs.join('\n'); el.scrollTop = el.scrollHeight; } catch(e) {}
 }
 setInterval(refreshLog, 2000);
+
+function copyLogs() {
+  const text = $('#log').textContent;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(function() {
+    const btn = $('#log-copy-btn');
+    const label = $('#log-copy-label');
+    btn.classList.add('copied');
+    label.textContent = 'Copied!';
+    setTimeout(function() { btn.classList.remove('copied'); label.textContent = 'Copy'; }, 2000);
+  });
+}
 
 // ── Usage dashboard ────────────────────────────────────────────────
 let _chartHistory = []; // cached for resize redraws
