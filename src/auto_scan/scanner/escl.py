@@ -125,11 +125,14 @@ class ESCLClient:
 
         return ScannerStatus(state=state, adf_state=adf_state)
 
-    def scan(self, settings: ScanSettings) -> list[bytes]:
+    def scan(self, settings: ScanSettings, on_page=None) -> list[bytes]:
         """Execute a scan job and return a list of page images (JPEG bytes).
 
         For ADF scanning, loops until all pages are consumed.
         For flatbed, returns a single page.
+
+        Args:
+            on_page: Optional callback called with page count after each page is scanned.
         """
         # Create the scan job
         resp = self._client.post(
@@ -191,6 +194,8 @@ class ESCLClient:
 
             pages.append(page_resp.content)
             print(f"  Page {len(pages)} scanned", file=sys.stderr)
+            if on_page:
+                on_page(len(pages))
 
             # Flatbed only scans one page
             if settings.source == "Platen":

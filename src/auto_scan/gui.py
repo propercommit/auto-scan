@@ -321,11 +321,18 @@ def _do_scan(data: dict) -> tuple[list[bytes], Config]:
         if status.state != "Idle":
             raise AutoScanError(f"Scanner is {status.state}. Wait and try again.")
         _log("Scanning...")
+
+        def _on_page(count):
+            with _state_lock:
+                job = state.get("job")
+                if job:
+                    job["pages_scanned"] = count
+
         settings = ScanSettings(
             source=source, color_mode=color,
             resolution=resolution, document_format=config.scan_format,
         )
-        images = client.scan(settings)
+        images = client.scan(settings, on_page=_on_page)
 
     _log(f"Scanned {len(images)} page(s)")
     return images, config
@@ -765,6 +772,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .radio-group label { display: flex; align-items: center; gap: 6px; font-weight: 400; cursor: pointer; }
   .radio-group input[type="radio"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .btn-row { display: flex; gap: 10px; }
+  .scan-progress { margin-top: 14px; padding: 14px 16px; background: #0F1117; border-radius: 10px; color: #F1F5F9; }
+  .scan-progress-inner { display: flex; align-items: center; gap: 10px; }
+  .scan-progress-spinner { width: 16px; height: 16px; border: 2px solid rgba(129,140,248,.3); border-top-color: #818CF8; border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
+  .scan-progress-text { font-size: 14px; font-weight: 600; }
+  .scan-progress-pages { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .scan-progress-page { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; background: #1A1D2B; border-radius: 6px; font-size: 12px; font-family: var(--mono); color: #94A3B8; animation: fadeSlideIn .3s ease; }
+  .scan-progress-page svg { color: #34D399; }
+  @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border: none; border-radius: var(--radius); font-size: 15px; font-weight: 600; font-family: var(--font); cursor: pointer; transition: background var(--transition), box-shadow var(--transition), transform .1s; width: 100%; }
   .btn:hover:not(:disabled) { box-shadow: 0 2px 8px rgba(0,0,0,.1); }
   .btn:active:not(:disabled) { transform: scale(.98); }
@@ -1093,6 +1108,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <button class="btn btn-batch" id="btn-batch" onclick="doBatchScan()" disabled><span class="spinner" aria-hidden="true"></span>Batch Scan</button>
       <button class="btn btn-secondary" id="btn-scan" onclick="scanOnly()" disabled><span class="spinner" aria-hidden="true"></span><span class="sr-only busy-text" hidden>Scanning...</span>Scan Only</button>
     </div>
+    <div class="scan-progress" id="scan-progress" style="display:none" aria-live="polite">
+      <div class="scan-progress-inner">
+        <span class="scan-progress-spinner"></span>
+        <span class="scan-progress-text" id="scan-progress-text">Scanning...</span>
+      </div>
+      <div class="scan-progress-pages" id="scan-progress-pages"></div>
+    </div>
   </div>
 
   <div class="card" id="results-card" style="display:none" aria-live="polite">
@@ -1300,10 +1322,36 @@ function getScanParams() {
 function setBusy(busy, statusText) {
   ['#btn-classify','#btn-scan','#btn-batch'].forEach(s => { const el = $(s); if (el) { el.disabled = busy; el.setAttribute('aria-busy', busy); el.classList.toggle('busy', busy); }});
   document.querySelectorAll('.busy-text').forEach(el => el.hidden = !busy);
-  if (statusText) {
-    const labels = {scanning: 'Scanning...', analyzing: 'Analyzing...', saving: 'Saving...'};
-    const txt = labels[statusText] || statusText;
+  const prog = $('#scan-progress');
+  if (busy) {
+    const labels = {scanning: 'Scanning pages...', analyzing: 'Analyzing with AI...', saving: 'Saving documents...'};
+    const txt = labels[statusText] || statusText || 'Working...';
     document.querySelectorAll('.busy-text').forEach(el => el.textContent = txt);
+    $('#scan-progress-text').textContent = txt;
+    prog.style.display = '';
+    if (statusText !== 'scanning') $('#scan-progress-pages').innerHTML = '';
+  } else {
+    prog.style.display = 'none';
+    $('#scan-progress-pages').innerHTML = '';
+  }
+}
+function updateScanProgress(job) {
+  const textEl = $('#scan-progress-text');
+  const pagesEl = $('#scan-progress-pages');
+  const labels = {scanning: 'Scanning pages...', analyzing: 'Analyzing with AI...', saving: 'Saving documents...'};
+  textEl.textContent = labels[job.status] || 'Working...';
+  if (job.status === 'scanning' && job.pages_scanned > 0) {
+    textEl.textContent = 'Scanning page ' + (job.pages_scanned + 1) + '...';
+    const current = pagesEl.children.length;
+    for (let i = current + 1; i <= job.pages_scanned; i++) {
+      const tag = document.createElement('span');
+      tag.className = 'scan-progress-page';
+      tag.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Page ' + i;
+      pagesEl.appendChild(tag);
+    }
+  } else if (job.status === 'analyzing') {
+    const n = job.pages_scanned || 0;
+    if (n > 0) textEl.textContent = 'Analyzing ' + n + ' page' + (n > 1 ? 's' : '') + ' with AI...';
   }
 }
 
@@ -1314,7 +1362,7 @@ function pollJob() {
         const res = await fetch('/api/job');
         const job = await res.json();
         if (job.status === 'scanning' || job.status === 'analyzing' || job.status === 'saving') {
-          setBusy(true, job.status);
+          updateScanProgress(job);
           refreshLog();
           return; // keep polling
         }
