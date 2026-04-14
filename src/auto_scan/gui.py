@@ -705,7 +705,8 @@ function renderRisk(el, level, risks) {
   const labels = {low: 'Low Risk', medium: 'Medium Risk', high: 'High Risk'};
   el.className = 'risk-alert risk-' + level;
   el.style.display = '';
-  el.innerHTML = '<h4>' + (icons[level]||'') + ' ' + (labels[level]||level) + '</h4><ul>' + risks.map(r => '<li>' + r + '</li>').join('') + '</ul>';
+  const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+  el.innerHTML = '<h4>' + (icons[level]||'') + ' ' + esc(labels[level]||level) + '</h4><ul>' + risks.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul>';
 }
 
 function showResult({folder, tags, filename, summary, date, path, riskLevel, risks}) {
