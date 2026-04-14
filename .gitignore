@@ -8,4 +8,5 @@ build/
 *.jpg
 *.jpeg
 *.pdf
+*.command
 *.DS_Store
