@@ -70,7 +70,7 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     """Send scanned page images to Claude Vision for classification and naming."""
     print("Analyzing document with AI...", file=sys.stderr)
 
-    client = anthropic.Anthropic(api_key=config.api_key)
+    client = anthropic.Anthropic(api_key=config.api_key, timeout=120.0)
 
     # Build message content: one image block per page + text prompt
     content: list[dict] = []
@@ -104,6 +104,8 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
             max_tokens=1024,
             messages=[{"role": "user", "content": content}],
         )
+    except anthropic.APITimeoutError as e:
+        raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
     except anthropic.APIError as e:
         raise AnalysisError(f"Claude API error: {e}") from e
 
@@ -181,7 +183,7 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
         raise AnalysisError("Batch scan supports up to 50 pages. Please scan fewer pages.")
 
     print(f"Batch analyzing {len(images)} pages...", file=sys.stderr)
-    client = anthropic.Anthropic(api_key=config.api_key)
+    client = anthropic.Anthropic(api_key=config.api_key, timeout=180.0)
 
     content: list[dict] = []
     for img_data in images:
@@ -208,6 +210,8 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
             max_tokens=4096,
             messages=[{"role": "user", "content": content}],
         )
+    except anthropic.APITimeoutError as e:
+        raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
     except anthropic.APIError as e:
         raise AnalysisError(f"Claude API error: {e}") from e
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import platform
 import subprocess
@@ -20,11 +21,14 @@ from auto_scan.analyzer import ALL_CATEGORIES, DocumentInfo, analyze_batch, anal
 from auto_scan.config import Config, load_config
 from auto_scan.dedup import image_hash
 from auto_scan.history import find_by_hash, record_scan, search_history
-from auto_scan.organizer import save_document, save_unclassified
+from auto_scan.organizer import sanitize_name, save_document, save_unclassified
 from auto_scan.scanner.discovery import ScannerInfo, discover_all_scanners, discover_scanner, scanner_info_from_ip
 from auto_scan.scanner.escl import ESCLClient, ScanSettings
 
 app = Flask(__name__)
+
+# Thread lock for shared mutable state
+_state_lock = threading.Lock()
 
 # ── Persistent settings ─────────────────────────────────────────────
 
@@ -39,15 +43,16 @@ SETTINGS_DEFAULTS = {
 
 
 def _settings_path() -> Path:
+    """Return the path to the persistent settings JSON file."""
     return Path.home() / ".auto_scan" / "settings.json"
 
 
 def _load_settings() -> dict:
+    """Load persistent settings from disk, falling back to defaults."""
     path = _settings_path()
     if path.exists():
         try:
-            import json as _json
-            data = _json.loads(path.read_text())
+            data = json.loads(path.read_text())
             return {**SETTINGS_DEFAULTS, **data}
         except Exception:
             pass
@@ -55,10 +60,10 @@ def _load_settings() -> dict:
 
 
 def _save_settings(settings: dict) -> None:
-    import json as _json
+    """Persist settings to disk."""
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_json.dumps(settings, indent=2) + "\n")
+    path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
 # ── App state ────────────────────────────────────────────────────────
@@ -75,9 +80,10 @@ state = {
 
 def _log(msg: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
-    state["logs"].append(f"[{ts}] {msg}")
-    if len(state["logs"]) > 200:
-        state["logs"] = state["logs"][-200:]
+    with _state_lock:
+        state["logs"].append(f"[{ts}] {msg}")
+        if len(state["logs"]) > 200:
+            state["logs"] = state["logs"][-200:]
 
 
 def _get_config(**overrides) -> Config:
@@ -85,6 +91,7 @@ def _get_config(**overrides) -> Config:
 
 
 def _make_thumbnail(image_data: bytes, max_dim: int = 800) -> bytes:
+    """Resize an image for preview, capping at max_dim pixels."""
     img = Image.open(io.BytesIO(image_data))
     w, h = img.size
     if w > max_dim or h > max_dim:
@@ -257,7 +264,8 @@ def api_connect():
         caps = client.get_capabilities()
         client.close()
 
-        state["scanner_info"] = info
+        with _state_lock:
+            state["scanner_info"] = info
         _log(f"Connected: {info.name} at {info.ip}")
         _log(f"  State: {status.state}, ADF: {status.adf_state or 'N/A'}")
 
@@ -287,13 +295,15 @@ def _do_scan(data: dict) -> tuple[list[bytes], Config]:
 
     config = _get_config(**overrides)
 
-    info = state.get("scanner_info")
+    with _state_lock:
+        info = state.get("scanner_info")
     if not info:
         if config.scanner_ip:
             info = scanner_info_from_ip(config.scanner_ip)
         else:
             info = discover_scanner(timeout=8.0)
-        state["scanner_info"] = info
+        with _state_lock:
+            state["scanner_info"] = info
 
     with ESCLClient(info.base_url) as client:
         status = client.get_status()
@@ -313,13 +323,14 @@ def _do_scan(data: dict) -> tuple[list[bytes], Config]:
 def _check_duplicate(images: list[bytes], config: Config) -> dict | None:
     """Check if these images were scanned before. Returns previous record or None."""
     h = image_hash(images)
-    state["_last_hash"] = h
+    with _state_lock:
+        state["_last_hash"] = h
     prev = find_by_hash(config.output_dir, h)
     return prev
 
 
-def _record(config, doc_info, folder, tags, pages, output_path):
-    """Record a scan in the history database."""
+def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: list[str], pages: int, output_path) -> None:
+    """Record a completed scan in the history database."""
     record_scan(
         output_dir=config.output_dir,
         filename=doc_info.filename if doc_info else Path(output_path).name,
@@ -339,96 +350,106 @@ def _record(config, doc_info, folder, tags, pages, output_path):
 def _run_scan_job(data: dict, mode: str):
     """Run a scan job in a background thread. Updates state['job']."""
     try:
-        state["job"] = {"status": "scanning"}
+        with _state_lock:
+            state["job"] = {"status": "scanning"}
         images, config = _do_scan(data)
-        state["job"]["status"] = "scanning"
 
         # Duplicate check
         prev = _check_duplicate(images, config)
         if prev:
             _log(f"Duplicate detected: previously saved as {prev['filename']}")
-            state["job"] = {
-                "status": "duplicate",
-                "result": {"duplicate": True, "previous": prev},
-            }
+            with _state_lock:
+                state["job"] = {
+                    "status": "duplicate",
+                    "result": {"duplicate": True, "previous": prev},
+                }
             return
 
         if mode == "auto":
             classify = data.get("classify", True)
             if classify:
-                state["job"]["status"] = "analyzing"
+                with _state_lock:
+                    state["job"]["status"] = "analyzing"
                 _log("Analyzing with Claude Vision...")
                 doc_info = analyze_document(images, config)
                 _log(f"Classified as: {doc_info.category}")
 
-                state["job"]["status"] = "saving"
+                with _state_lock:
+                    state["job"]["status"] = "saving"
                 output_path = save_document(images, doc_info, config, tags=doc_info.tags)
                 _log(f"Saved: {output_path}")
                 _record(config, doc_info, doc_info.category, doc_info.tags, len(images), output_path)
 
-                state["job"] = {
-                    "status": "done",
-                    "result": {
-                        "ok": True, "classified": True, "pages": len(images),
-                        "category": doc_info.category, "filename": doc_info.filename,
-                        "summary": doc_info.summary, "date": doc_info.date,
-                        "output_path": str(output_path), "tags": doc_info.tags,
-                        "risk_level": doc_info.risk_level, "risks": doc_info.risks,
-                    },
-                }
+                with _state_lock:
+                    state["job"] = {
+                        "status": "done",
+                        "result": {
+                            "ok": True, "classified": True, "pages": len(images),
+                            "category": doc_info.category, "filename": doc_info.filename,
+                            "summary": doc_info.summary, "date": doc_info.date,
+                            "output_path": str(output_path), "tags": doc_info.tags,
+                            "risk_level": doc_info.risk_level, "risks": doc_info.risks,
+                        },
+                    }
             else:
-                state["job"]["status"] = "saving"
+                with _state_lock:
+                    state["job"]["status"] = "saving"
                 output_path = save_unclassified(images, config)
                 _log(f"Saved: {output_path}")
                 _record(config, None, "unsorted", [], len(images), output_path)
 
-                state["job"] = {
-                    "status": "done",
-                    "result": {
-                        "ok": True, "classified": False, "pages": len(images),
-                        "output_path": str(output_path),
-                    },
-                }
+                with _state_lock:
+                    state["job"] = {
+                        "status": "done",
+                        "result": {
+                            "ok": True, "classified": False, "pages": len(images),
+                            "output_path": str(output_path),
+                        },
+                    }
 
         elif mode == "assisted":
-            state["job"]["status"] = "analyzing"
+            with _state_lock:
+                state["job"]["status"] = "analyzing"
             _log("Analyzing with Claude Vision...")
             doc_info = analyze_document(images, config)
             _log(f"AI suggests: {doc_info.category}")
 
-            state["pending_images"] = images
-            state["pending_doc_info"] = doc_info
-            state["pending_config"] = config
-
             thumb = _make_thumbnail(images[0])
             preview_b64 = base64.b64encode(thumb).decode("ascii")
 
-            state["job"] = {
-                "status": "done",
-                "result": {
-                    "ok": True, "pages": len(images), "preview": preview_b64,
-                    "category": doc_info.category,
-                    "suggested_categories": doc_info.suggested_categories,
-                    "all_categories": ALL_CATEGORIES,
-                    "filename": doc_info.filename, "summary": doc_info.summary,
-                    "date": doc_info.date, "key_fields": doc_info.key_fields,
-                    "tags": doc_info.tags,
-                    "risk_level": doc_info.risk_level, "risks": doc_info.risks,
-                },
-            }
+            with _state_lock:
+                state["pending_images"] = images
+                state["pending_doc_info"] = doc_info
+                state["pending_config"] = config
+                state["job"] = {
+                    "status": "done",
+                    "result": {
+                        "ok": True, "pages": len(images), "preview": preview_b64,
+                        "category": doc_info.category,
+                        "suggested_categories": doc_info.suggested_categories,
+                        "all_categories": ALL_CATEGORIES,
+                        "filename": doc_info.filename, "summary": doc_info.summary,
+                        "date": doc_info.date, "key_fields": doc_info.key_fields,
+                        "tags": doc_info.tags,
+                        "risk_level": doc_info.risk_level, "risks": doc_info.risks,
+                    },
+                }
 
         elif mode == "batch-auto":
-            state["job"]["status"] = "analyzing"
+            with _state_lock:
+                state["job"]["status"] = "analyzing"
             _log(f"Batch analyzing {len(images)} pages...")
             batch_results = analyze_batch(images, config)
             _log(f"Detected {len(batch_results)} document(s)")
 
-            state["job"]["status"] = "saving"
+            with _state_lock:
+                state["job"]["status"] = "saving"
             saved = []
             for pages, doc_info in batch_results:
                 doc_images = [images[p] for p in pages if p < len(images)]
                 h = image_hash(doc_images)
-                state["_last_hash"] = h
+                with _state_lock:
+                    state["_last_hash"] = h
                 output_path = save_document(doc_images, doc_info, config, tags=doc_info.tags)
                 _record(config, doc_info, doc_info.category, doc_info.tags, len(doc_images), output_path)
                 saved.append({
@@ -443,20 +464,18 @@ def _run_scan_job(data: dict, mode: str):
                 })
                 _log(f"  Saved: {output_path.name}")
 
-            state["job"] = {
-                "status": "done",
-                "result": {"ok": True, "batch": True, "documents": saved},
-            }
+            with _state_lock:
+                state["job"] = {
+                    "status": "done",
+                    "result": {"ok": True, "batch": True, "documents": saved},
+                }
 
         elif mode == "batch-assisted":
-            state["job"]["status"] = "analyzing"
+            with _state_lock:
+                state["job"]["status"] = "analyzing"
             _log(f"Batch analyzing {len(images)} pages...")
             batch_results = analyze_batch(images, config)
             _log(f"Detected {len(batch_results)} document(s)")
-
-            state["pending_images"] = images
-            state["pending_batch_docs"] = batch_results
-            state["pending_config"] = config
 
             # Thumbnails for ALL pages so frontend can rearrange freely
             all_previews = []
@@ -477,25 +496,31 @@ def _run_scan_job(data: dict, mode: str):
                     "risk_level": doc_info.risk_level, "risks": doc_info.risks,
                 })
 
-            state["job"] = {
-                "status": "done",
-                "result": {
-                    "ok": True, "batch": True,
-                    "all_previews": all_previews,
-                    "documents": docs,
-                },
-            }
+            with _state_lock:
+                state["pending_images"] = images
+                state["pending_batch_docs"] = batch_results
+                state["pending_config"] = config
+                state["job"] = {
+                    "status": "done",
+                    "result": {
+                        "ok": True, "batch": True,
+                        "all_previews": all_previews,
+                        "documents": docs,
+                    },
+                }
 
     except Exception as e:
         _log(f"Error: {e}")
-        state["job"] = {"status": "error", "result": {"ok": False, "error": str(e)}}
+        with _state_lock:
+            state["job"] = {"status": "error", "result": {"ok": False, "error": str(e)}}
 
 
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
     """Automatic mode: start scan job in background."""
-    if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
-        return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
+    with _state_lock:
+        if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
+            return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
     data = request.json or {}
     threading.Thread(
         target=_run_scan_job, args=(data, "auto"), daemon=True,
@@ -506,8 +531,9 @@ def api_scan():
 @app.route("/api/scan-assisted", methods=["POST"])
 def api_scan_assisted():
     """Assisted mode: start scan + analyze job in background."""
-    if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
-        return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
+    with _state_lock:
+        if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
+            return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
     data = request.json or {}
     threading.Thread(
         target=_run_scan_job, args=(data, "assisted"), daemon=True,
@@ -518,8 +544,9 @@ def api_scan_assisted():
 @app.route("/api/scan-batch", methods=["POST"])
 def api_scan_batch():
     """Batch mode: scan all pages, group by document, classify each."""
-    if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
-        return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
+    with _state_lock:
+        if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
+            return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
     data = request.json or {}
     mode = "batch-auto" if data.get("auto", True) else "batch-assisted"
     threading.Thread(
@@ -531,10 +558,11 @@ def api_scan_batch():
 @app.route("/api/job")
 def api_job():
     """Poll the current scan job status."""
-    job = state.get("job")
-    if not job:
-        return jsonify({"status": "idle"})
-    return jsonify(job)
+    with _state_lock:
+        job = state.get("job")
+        if not job:
+            return jsonify({"status": "idle"})
+        return jsonify(job)
 
 
 @app.route("/api/page-image/<int:page_num>")
@@ -552,20 +580,21 @@ def api_page_image(page_num):
 def api_save_classified():
     """Save pending scanned images with folder + tags."""
     data = request.json or {}
-    folder = data.get("folder", "").strip() or "other"
+    folder = sanitize_name(data.get("folder", "").strip() or "other")
     tags = data.get("tags", [])
-    filename = data.get("filename", "")
+    filename = data.get("filename", "").strip()
 
-    images = state.get("pending_images")
-    doc_info = state.get("pending_doc_info")
-    config = state.get("pending_config")
+    with _state_lock:
+        images = state.get("pending_images")
+        doc_info = state.get("pending_doc_info")
+        config = state.get("pending_config")
 
     if not images or not doc_info:
         return jsonify({"ok": False, "error": "No pending scan to save."}), 400
 
     try:
         if filename:
-            doc_info.filename = filename
+            doc_info.filename = sanitize_name(filename.removesuffix(".pdf")) + ".pdf"
 
         if not config:
             config = _get_config(
@@ -581,9 +610,10 @@ def api_save_classified():
 
         _record(config, doc_info, folder, tags, len(images), output_path)
 
-        state["pending_images"] = None
-        state["pending_doc_info"] = None
-        state["pending_config"] = None
+        with _state_lock:
+            state["pending_images"] = None
+            state["pending_doc_info"] = None
+            state["pending_config"] = None
 
         return jsonify({
             "ok": True,
@@ -602,8 +632,9 @@ def api_save_batch():
     data = request.json or {}
     documents = data.get("documents", [])
 
-    images = state.get("pending_images")
-    config = state.get("pending_config")
+    with _state_lock:
+        images = state.get("pending_images")
+        config = state.get("pending_config")
 
     if not images:
         return jsonify({"ok": False, "error": "No pending batch to save."}), 400
@@ -620,10 +651,12 @@ def api_save_batch():
             if not pages:
                 continue
 
-            folder = edit.get("folder", "").strip() or "other"
+            folder = sanitize_name(edit.get("folder", "").strip() or "other")
             tags = edit.get("tags", [])
-            filename = edit.get("filename", "")
-            if not filename:
+            raw_filename = edit.get("filename", "").strip()
+            if raw_filename:
+                filename = sanitize_name(raw_filename.removesuffix(".pdf")) + ".pdf"
+            else:
                 filename = f"{datetime.now().strftime('%Y-%m-%d')}_document.pdf"
 
             doc_info = DocumentInfo(
@@ -647,9 +680,10 @@ def api_save_batch():
                 "folder": folder, "tags": tags, "filename": doc_info.filename,
             })
 
-        state["pending_images"] = None
-        state["pending_batch_docs"] = None
-        state["pending_config"] = None
+        with _state_lock:
+            state["pending_images"] = None
+            state["pending_batch_docs"] = None
+            state["pending_config"] = None
 
         return jsonify({"ok": True, "documents": results})
     except Exception as e:
@@ -671,7 +705,8 @@ def api_history():
 
 @app.route("/api/logs")
 def api_logs():
-    return jsonify(state["logs"])
+    with _state_lock:
+        return jsonify(list(state["logs"]))
 
 
 # ── HTML Template ────────────────────────────────────────────────────

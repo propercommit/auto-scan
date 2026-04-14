@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,26 @@ from auto_scan.analyzer import DocumentInfo
 from auto_scan.config import Config
 
 _HAS_OCRMYPDF = shutil.which("ocrmypdf") is not None
+
+
+def sanitize_name(name: str) -> str:
+    """Sanitize a folder or file name to prevent path traversal and bad characters.
+
+    Strips path separators, .., and characters illegal on common filesystems.
+    Returns a safe, non-empty string.
+    """
+    # Remove any path separators and null bytes
+    name = name.replace("/", "_").replace("\\", "_").replace("\0", "")
+    # Remove .. components
+    name = name.replace("..", "_")
+    # Strip leading dots (hidden files), underscores, and whitespace
+    name = name.lstrip("._ \t")
+    # Remove characters illegal on Windows/macOS: < > : " | ? *
+    name = re.sub(r'[<>:"|?*]', '_', name)
+    # Collapse runs of underscores/spaces
+    name = re.sub(r'[_\s]+', '_', name)
+    name = name.strip("_ ")
+    return name or "document"
 
 
 def _ocr_pdf(path: Path) -> None:
@@ -59,7 +80,7 @@ def save_document(
         folder: Subfolder name inside output_dir.  Falls back to doc_info.category.
         tags: Metadata tags to embed in the PDF.  Falls back to [doc_info.category].
     """
-    folder_name = folder or doc_info.category
+    folder_name = sanitize_name(folder or doc_info.category)
     category_dir = config.output_dir / folder_name
     category_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,10 +89,8 @@ def save_document(
     embed_tags = tags if tags is not None else [doc_info.category]
     pdf_bytes = _embed_tags(pdf_bytes, embed_tags, doc_info.summary)
 
-    # Resolve filename collisions
-    filename = doc_info.filename
-    if not filename.endswith(".pdf"):
-        filename += ".pdf"
+    # Sanitize and resolve filename collisions
+    filename = sanitize_name(doc_info.filename.removesuffix(".pdf")) + ".pdf"
 
     output_path = category_dir / filename
     counter = 2
