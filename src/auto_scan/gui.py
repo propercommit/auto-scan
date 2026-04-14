@@ -1934,6 +1934,7 @@ function updateScanProgress(job) {
 }
 
 let _redactWarningShown = false;
+let _pollCancelled = false;
 function showRedactWarning(job) {
   if (_redactWarningShown) return;
   _redactWarningShown = true;
@@ -1998,7 +1999,9 @@ function showRedactWarning(job) {
 }
 
 function hideRedactWarning() {
-  _redactWarningShown = false;
+  // NOTE: do NOT reset _redactWarningShown here — that flag prevents the
+  // poll loop from re-showing the confirmation after cancel/confirm.
+  // It is only reset by resetPipeline() at the start of a new scan.
   const el = $('#redact-alert');
   el.style.display = 'none';
   el.className = 'redact-alert';
@@ -2013,12 +2016,22 @@ async function confirmSend() {
 
 async function cancelSend() {
   hideRedactWarning();
+  _pollCancelled = true;
   try { await fetch('/api/job/cancel', { method: 'POST' }); } catch(e) {}
 }
 
 function pollJob() {
+  _pollCancelled = false;
   return new Promise((resolve, reject) => {
     const interval = setInterval(async () => {
+      // Cancel clicked — resolve immediately so the UI resets
+      if (_pollCancelled) {
+        clearInterval(interval);
+        hideRedactWarning();
+        refreshLog();
+        resolve({status: 'cancelled'});
+        return;
+      }
       try {
         const res = await fetch('/api/job');
         const job = await res.json();
