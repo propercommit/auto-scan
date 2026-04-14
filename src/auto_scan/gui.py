@@ -947,7 +947,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div style="margin-top:10px">
       <label for="max-tokens">Daily Token Budget (0 = unlimited)</label>
-      <input type="text" id="max-tokens" placeholder="0" onchange="saveSettings()">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="max-tokens" placeholder="0" onchange="saveSettings()" style="flex:1">
+        <button class="btn btn-secondary" style="width:auto;padding:8px 14px;font-size:13px;white-space:nowrap" onclick="crazyMode()">Crazy Mode</button>
+      </div>
       <div class="field-hint">Blocks API calls when the daily limit is reached. Resets at midnight.</div>
     </div>
   </div>
@@ -1110,6 +1113,13 @@ function saveSettings() {
     max_tokens: $('#max-tokens').value.trim() || '0',
   };
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings) }).catch(() => {});
+}
+
+function crazyMode() {
+  if (!confirm('Remove all token limits? API costs will be uncapped.')) return;
+  $('#max-tokens').value = '0';
+  saveSettings();
+  refreshUsage();
 }
 
 function setMode(mode) {
