@@ -453,11 +453,37 @@ def _run_scan_job(data: dict, mode: str):
             from auto_scan.redactor import redact_image
             total_redactions = 0
             all_redacted_types = set()
+            redaction_skipped = False
+            skip_reason = ""
             for img_data in images:
                 r = redact_image(img_data, enabled_patterns=redact_pats)
                 total_redactions += r.redaction_count
                 all_redacted_types.update(r.redacted_types)
-            if total_redactions > 0:
+                if r.skipped:
+                    redaction_skipped = True
+                    skip_reason = r.skip_reason
+
+            if redaction_skipped:
+                _log(f"Redaction SKIPPED: {skip_reason}")
+                with _state_lock:
+                    state["job"]["status"] = "confirm_send"
+                    state["job"]["redaction"] = {
+                        "skipped": True,
+                        "reason": skip_reason,
+                    }
+                # Wait for user to confirm or cancel
+                for _ in range(600):  # 10 min max wait
+                    import time
+                    time.sleep(1)
+                    with _state_lock:
+                        if state["job"].get("user_confirmed"):
+                            break
+                        if state["job"].get("user_cancelled"):
+                            _log("Scan cancelled by user — documents not sent to AI")
+                            state["job"] = {"status": "error", "result": {"ok": False, "error": "Cancelled: documents not sent to AI."}}
+                            return
+                _log("User confirmed — sending unredacted documents to AI")
+            elif total_redactions > 0:
                 _log(f"Redacted {total_redactions} sensitive region(s) [{', '.join(sorted(all_redacted_types))}] before sending to AI")
                 with _state_lock:
                     state["job"]["redaction"] = {
@@ -667,6 +693,28 @@ def api_job():
         return jsonify(job)
 
 
+@app.route("/api/job/confirm", methods=["POST"])
+def api_job_confirm():
+    """User confirms sending unredacted data to AI."""
+    with _state_lock:
+        job = state.get("job")
+        if job and job.get("status") == "confirm_send":
+            job["user_confirmed"] = True
+            return jsonify({"ok": True})
+    return jsonify({"ok": False}), 400
+
+
+@app.route("/api/job/cancel", methods=["POST"])
+def api_job_cancel():
+    """User cancels sending data to AI."""
+    with _state_lock:
+        job = state.get("job")
+        if job and job.get("status") == "confirm_send":
+            job["user_cancelled"] = True
+            return jsonify({"ok": True})
+    return jsonify({"ok": False}), 400
+
+
 @app.route("/api/page-image/<int:page_num>")
 def api_page_image(page_num):
     """Serve a full-size page image for preview. page_num is 1-indexed."""
@@ -865,6 +913,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .scan-progress-page svg { color: #34D399; }
   .redact-alert { margin-top: 10px; padding: 10px 14px; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.25); border-radius: 8px; font-size: 13px; color: #FCA5A5; display: flex; align-items: center; gap: 8px; }
   .redact-alert svg { flex-shrink: 0; color: #F87171; }
+  .redact-alert.redact-warning { background: rgba(239,68,68,.18); border: 2px solid rgba(239,68,68,.5); padding: 16px 18px; flex-direction: column; }
   @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border: none; border-radius: var(--radius); font-size: 15px; font-weight: 600; font-family: var(--font); cursor: pointer; transition: background var(--transition), box-shadow var(--transition), transform .1s; width: 100%; }
   .btn:hover:not(:disabled) { box-shadow: 0 2px 8px rgba(0,0,0,.1); }
@@ -1522,16 +1571,58 @@ function updateScanProgress(job) {
     const n = job.pages_scanned || 0;
     if (n > 0) textEl.textContent = 'Analyzing ' + n + ' page' + (n > 1 ? 's' : '') + ' with AI...';
   }
-  // Show redaction alert if sensitive data was found
+  // Show redaction alert if sensitive data was found and redacted
   const alertEl = $('#redact-alert');
-  if (job.redaction && job.redaction.count > 0) {
+  if (job.redaction && !job.redaction.skipped && job.redaction.count > 0) {
     const types = job.redaction.types.join(', ');
     alertEl.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
       '<span>Sensitive data detected (' + types + ') \u2014 <strong>' + job.redaction.count + ' region(s) redacted</strong> before sending to AI</span>';
     alertEl.style.display = '';
-  } else {
+  } else if (!job.redaction || !job.redaction.skipped) {
     alertEl.style.display = 'none';
   }
+}
+
+let _redactWarningShown = false;
+function showRedactWarning(job) {
+  if (_redactWarningShown) return;
+  _redactWarningShown = true;
+  const reason = (job.redaction && job.redaction.reason) || 'Unknown reason';
+  const alertEl = $('#redact-alert');
+  alertEl.className = 'redact-alert redact-warning';
+  alertEl.innerHTML =
+    '<div style="flex:1">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+        '<strong style="font-size:15px">Redaction could not run</strong>' +
+      '</div>' +
+      '<div style="margin-bottom:10px">' + reason.replace(/</g, '&lt;') + '</div>' +
+      '<div style="font-size:12px;opacity:.8;margin-bottom:12px">Your scanned documents may contain sensitive information (SSN, IBAN, credit cards, etc.) that will be sent unredacted to the Claude API.</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn" style="background:#EF4444;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel \u2014 Don\'t Send</button>' +
+        '<button class="btn" style="background:rgba(255,255,255,.1);color:#F1F5F9;border:1px solid rgba(255,255,255,.2);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Anyway</button>' +
+      '</div>' +
+    '</div>';
+  alertEl.style.display = '';
+  // Update progress text
+  $('#scan-progress-text').textContent = 'Waiting for confirmation...';
+}
+
+function hideRedactWarning() {
+  _redactWarningShown = false;
+  $('#redact-alert').style.display = 'none';
+  $('#redact-alert').className = 'redact-alert';
+}
+
+async function confirmSend() {
+  hideRedactWarning();
+  $('#scan-progress-text').textContent = 'Sending to AI...';
+  try { await fetch('/api/job/confirm', { method: 'POST' }); } catch(e) {}
+}
+
+async function cancelSend() {
+  hideRedactWarning();
+  try { await fetch('/api/job/cancel', { method: 'POST' }); } catch(e) {}
 }
 
 function pollJob() {
@@ -1545,7 +1636,12 @@ function pollJob() {
           refreshLog();
           return; // keep polling
         }
+        if (job.status === 'confirm_send') {
+          showRedactWarning(job);
+          return; // keep polling, waiting for user
+        }
         clearInterval(interval);
+        hideRedactWarning();
         refreshLog();
         refreshUsage();
         resolve(job);

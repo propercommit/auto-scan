@@ -48,6 +48,8 @@ class RedactionResult:
     redacted_image: bytes
     redaction_count: int = 0
     redacted_types: list[str] = field(default_factory=list)
+    skipped: bool = False
+    skip_reason: str = ""
 
 
 def _has_tesseract() -> bool:
@@ -69,13 +71,20 @@ def redact_image(
         RedactionResult with redacted image bytes and stats.
     """
     if not _has_tesseract():
-        # No OCR available — return image unchanged
-        return RedactionResult(redacted_image=image_data)
+        return RedactionResult(
+            redacted_image=image_data,
+            skipped=True,
+            skip_reason="tesseract is not installed (brew install tesseract)",
+        )
 
     try:
         import pytesseract
     except ImportError:
-        return RedactionResult(redacted_image=image_data)
+        return RedactionResult(
+            redacted_image=image_data,
+            skipped=True,
+            skip_reason="pytesseract Python package is not installed (pip install pytesseract)",
+        )
 
     patterns = enabled_patterns or DEFAULT_ENABLED
     active = {name: pat for name, pat in PATTERNS.items() if name in patterns}
