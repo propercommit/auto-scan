@@ -140,8 +140,15 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     try:
         message = client.messages.create(
             model=config.claude_model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": content}],
+            max_tokens=2048,
+            system=(
+                "You are a document classification API. You ONLY output valid JSON objects. "
+                "Never output explanations, thinking, or markdown — ONLY the JSON object."
+            ),
+            messages=[
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "{"},
+            ],
         )
     except anthropic.APITimeoutError as e:
         raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
@@ -155,12 +162,12 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
         file=sys.stderr,
     )
 
-    # Parse the JSON response
+    # Parse the JSON response — prepend "{" from assistant prefill
     response_text = ""
     for block in message.content:
         if hasattr(block, "text"):
             response_text += block.text
-    response_text = response_text.strip()
+    response_text = "{" + response_text.strip()
 
     # Strip markdown code fences if present
     if response_text.startswith("```"):
@@ -300,14 +307,16 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
             model=config.claude_model,
             max_tokens=8192,
             system=(
-                "You are a professional document classification system. "
-                "READ the actual text content on every page — titles, headers, "
-                "document type labels, reference numbers. The text content is the "
-                "strongest signal for classification. A page whose header says "
-                "'Insurance' is an insurance document, never a sales document. "
-                "Always split different document types into separate groups."
+                "You are a document classification API. You ONLY output valid JSON arrays. "
+                "Never output explanations, thinking, or markdown — ONLY the JSON array. "
+                "Read the text on every page to classify correctly. "
+                "A page with 'Insurance' in the header is insurance, not sales. "
+                "Split different document types into separate groups."
             ),
-            messages=[{"role": "user", "content": content}],
+            messages=[
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "["},
+            ],
         )
     except anthropic.APITimeoutError as e:
         raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
@@ -321,14 +330,14 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
         file=sys.stderr,
     )
 
-    # Extract text from response — handle multiple content blocks
+    # Extract text from response — prepend "[" from assistant prefill
     response_text = ""
     for block in message.content:
         if hasattr(block, "text"):
             response_text += block.text
-    response_text = response_text.strip()
+    response_text = "[" + response_text.strip()
 
-    if not response_text:
+    if response_text == "[":
         stop = message.stop_reason
         raise AnalysisError(
             f"Empty response from Claude (stop_reason={stop}). "
@@ -337,7 +346,6 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
 
     # Strip markdown code fences
     if response_text.startswith("```"):
-        # Remove opening fence (```json or ```) and closing fence
         lines = response_text.split("\n")
         if lines[0].startswith("```"):
             lines = lines[1:]
