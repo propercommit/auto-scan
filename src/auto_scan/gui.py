@@ -923,13 +923,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-doc-summary { font-size: 14px; color: var(--gray); margin-bottom: 8px; }
   .batch-page-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; min-height: 90px; padding: 10px; border: 2px dashed var(--border); border-radius: var(--radius); transition: border-color var(--transition), background var(--transition); }
   .batch-page-grid.drop-target { border-color: var(--primary); background: var(--primary-light); }
-  .batch-page { width: 56px; text-align: center; position: relative; border-radius: 6px; transition: opacity var(--transition); cursor: grab; }
+  .batch-page { width: 96px; text-align: center; position: relative; border-radius: 6px; transition: opacity var(--transition); cursor: grab; }
   .batch-page:active { cursor: grabbing; }
   .batch-page.dragging { opacity: .3; }
-  .batch-page img { width: 80px; height: 104px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); transition: border-color var(--transition); }
+  .batch-page img { width: 96px; height: 124px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); transition: border-color var(--transition); }
   .batch-page:hover img { border-color: var(--primary); }
-  .batch-page span { display: block; font-size: 12px; color: var(--gray); margin-top: 2px; }
-  .batch-page select { width: 100%; font-size: 11px; padding: 2px; border: 1px solid var(--border); border-radius: 3px; margin-top: 2px; cursor: pointer; }
+  .batch-page span { display: block; font-size: 13px; font-weight: 600; color: var(--gray); margin-top: 4px; }
+  .batch-page select { width: 100%; font-size: 13px; padding: 4px 6px; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 4px; cursor: pointer; background: #fff; color: #212529; }
   .batch-page-grid-empty { color: var(--gray-light); font-size: 14px; font-style: italic; padding: 16px; text-align: center; width: 100%; }
   .btn-add-doc { background: none; border: 2px dashed var(--border); border-radius: var(--radius); padding: 10px; width: 100%; font-size: 13px; font-weight: 600; color: var(--gray); cursor: pointer; transition: border-color var(--transition), color var(--transition); font-family: var(--font); margin-bottom: 8px; }
   .btn-add-doc:hover { border-color: var(--primary); color: var(--primary); }
@@ -951,10 +951,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .lightbox-close:hover { background: rgba(255,255,255,.3); }
   .batch-fields { display: grid; grid-template-columns: 80px 1fr; gap: 6px 12px; font-size: 14px; align-items: center; }
   .batch-fields label { font-weight: 600; color: var(--gray); font-size: 13px; }
-  .batch-fields input { padding: 8px 12px; font-size: 14px; font-family: var(--mono); }
+  .batch-fields input[type="text"] { padding: 8px 12px; font-size: 14px; font-family: var(--mono); border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; width: 100%; box-sizing: border-box; }
+  .batch-fields input[type="text"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); box-shadow: var(--focus-ring); }
   .batch-tag-grid { display: flex; flex-wrap: wrap; gap: 6px; grid-column: 2; }
   .batch-add-tag-row { display: flex; gap: 6px; grid-column: 2; margin-top: 4px; }
-  .batch-add-tag-row input { flex: 1; padding: 8px 12px; font-size: 14px; font-family: var(--font); border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; }
+  .batch-add-tag-row input[type="text"] { flex: 1; min-width: 0; width: auto; padding: 8px 12px; font-size: 14px; font-family: var(--font); border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; }
   .batch-add-tag-row button { flex-shrink: 0; padding: 8px 14px; font-size: 13px; }
   .batch-tag { padding: 6px 14px; border: 2px solid var(--border); border-radius: var(--radius); font-size: 14px; font-weight: 500; font-family: var(--font); cursor: pointer; background: #fff; color: #212529; transition: all var(--transition); }
   .batch-tag.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 600; }
