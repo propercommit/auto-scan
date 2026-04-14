@@ -389,16 +389,16 @@ def _run_scan_job(data: dict, mode: str):
             state["pending_batch_docs"] = batch_results
             state["pending_config"] = config
 
+            # Thumbnails for ALL pages so frontend can rearrange freely
+            all_previews = []
+            for img_data in images:
+                thumb = _make_thumbnail(img_data, max_dim=150)
+                all_previews.append(base64.b64encode(thumb).decode("ascii"))
+
             docs = []
             for pages, doc_info in batch_results:
-                first_page = pages[0] if pages else 0
-                preview_b64 = ""
-                if first_page < len(images):
-                    thumb = _make_thumbnail(images[first_page])
-                    preview_b64 = base64.b64encode(thumb).decode("ascii")
                 docs.append({
                     "pages": [p + 1 for p in pages],
-                    "preview": preview_b64,
                     "category": doc_info.category,
                     "suggested_categories": doc_info.suggested_categories,
                     "all_categories": ALL_CATEGORIES,
@@ -410,7 +410,11 @@ def _run_scan_job(data: dict, mode: str):
 
             state["job"] = {
                 "status": "done",
-                "result": {"ok": True, "batch": True, "documents": docs},
+                "result": {
+                    "ok": True, "batch": True,
+                    "all_previews": all_previews,
+                    "documents": docs,
+                },
             }
 
     except Exception as e:
@@ -514,28 +518,41 @@ def api_save_classified():
 
 @app.route("/api/save-batch", methods=["POST"])
 def api_save_batch():
-    """Save all documents from a batch scan with user edits."""
+    """Save all documents from a batch scan with user-rearranged pages."""
     data = request.json or {}
     documents = data.get("documents", [])
 
     images = state.get("pending_images")
-    batch_docs = state.get("pending_batch_docs")
     config = state.get("pending_config")
 
-    if not images or not batch_docs:
+    if not images:
         return jsonify({"ok": False, "error": "No pending batch to save."}), 400
+
+    if not config:
+        config = _get_config(
+            **({"output_dir": data["output_dir"]} if data.get("output_dir") else {}),
+        )
 
     try:
         results = []
-        for i, edit in enumerate(documents):
-            if i >= len(batch_docs):
-                break
-            pages, doc_info = batch_docs[i]
+        for edit in documents:
+            pages = [p - 1 for p in edit.get("pages", [])]  # 1-indexed → 0-indexed
+            if not pages:
+                continue
 
-            if edit.get("filename"):
-                doc_info.filename = edit["filename"]
-            folder = edit.get("folder", "").strip() or doc_info.category
-            tags = edit.get("tags", doc_info.tags)
+            folder = edit.get("folder", "").strip() or "other"
+            tags = edit.get("tags", [])
+            filename = edit.get("filename", "")
+            if not filename:
+                filename = f"{datetime.now().strftime('%Y-%m-%d')}_document.pdf"
+
+            doc_info = DocumentInfo(
+                category=folder,
+                filename=filename,
+                summary=edit.get("summary", ""),
+                date=edit.get("date"),
+                tags=tags,
+            )
 
             doc_images = [images[p] for p in pages if p < len(images)]
             output_path = save_document(doc_images, doc_info, config, folder=folder, tags=tags)
@@ -681,11 +698,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-modal { width: 900px; max-height: 90vh; overflow-y: auto; }
   .batch-docs { display: flex; flex-direction: column; gap: 14px; max-height: 55vh; overflow-y: auto; padding: 4px; }
   .batch-doc { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--bg); }
-  .batch-doc-head { display: flex; gap: 12px; }
-  .batch-doc-thumb { width: 64px; height: 88px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); flex-shrink: 0; }
-  .batch-doc-body { flex: 1; min-width: 0; }
-  .batch-doc-pages { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--primary); margin-bottom: 2px; }
+  .batch-doc-head { margin-bottom: 10px; }
+  .batch-doc-title { font-size: 13px; font-weight: 700; color: #212529; margin-bottom: 2px; display: flex; align-items: center; gap: 8px; }
+  .batch-doc-title .batch-doc-label { flex: 1; }
   .batch-doc-summary { font-size: 13px; color: var(--gray); margin-bottom: 8px; }
+  .batch-page-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; min-height: 68px; padding: 8px; border: 2px dashed var(--border); border-radius: 8px; transition: border-color .15s, background .15s; }
+  .batch-page-grid.drop-target { border-color: var(--primary); background: var(--primary-light); }
+  .batch-page { width: 56px; text-align: center; position: relative; border-radius: 6px; transition: opacity .15s; cursor: grab; }
+  .batch-page.dragging { opacity: .3; }
+  .batch-page img { width: 56px; height: 72px; object-fit: cover; border-radius: 4px; border: 2px solid var(--border); transition: border-color .15s; pointer-events: none; }
+  .batch-page:hover img { border-color: var(--primary); }
+  .batch-page span { display: block; font-size: 10px; color: var(--gray); margin-top: 2px; }
+  .batch-page select { width: 100%; font-size: 9px; padding: 1px; border: 1px solid var(--border); border-radius: 3px; margin-top: 2px; cursor: pointer; }
+  .batch-page-grid-empty { color: var(--gray-light); font-size: 13px; font-style: italic; padding: 16px; text-align: center; width: 100%; }
+  .btn-add-doc { background: none; border: 2px dashed var(--border); border-radius: 10px; padding: 10px; width: 100%; font-size: 13px; font-weight: 600; color: var(--gray); cursor: pointer; transition: border-color .15s, color .15s; font-family: var(--font); margin-bottom: 8px; }
+  .btn-add-doc:hover { border-color: var(--primary); color: var(--primary); }
+  .btn-add-doc:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .btn-remove-doc { background: none; border: none; color: var(--red); font-size: 12px; cursor: pointer; font-weight: 600; font-family: var(--font); padding: 2px 8px; border-radius: 4px; }
+  .btn-remove-doc:hover { background: #f8d7da; }
+  .btn-clear { margin-top: 10px; display: inline-block; font-size: 13px; font-weight: 600; color: var(--gray); background: none; border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-family: var(--font); }
+  .btn-clear:hover { background: #e9ecef; }
   .batch-fields { display: grid; grid-template-columns: 64px 1fr; gap: 5px 10px; font-size: 13px; align-items: center; }
   .batch-fields label { font-weight: 600; color: var(--gray); }
   .batch-fields input { padding: 5px 8px; font-size: 13px; font-family: var(--mono); }
@@ -770,11 +802,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </dl>
     <div class="risk-alert" id="r-risk" style="display:none"></div>
     <div class="output-path" id="r-path" style="display:none"></div>
+    <button class="btn-clear" onclick="clearResults()">Clear</button>
   </div>
 
   <div class="card" id="batch-results-card" style="display:none" aria-live="polite">
     <h2 id="batch-results-title">Batch Complete</h2>
     <ul class="batch-results" id="batch-results-list"></ul>
+    <button class="btn-clear" onclick="clearResults()">Clear</button>
   </div>
 
   <div class="card">
@@ -1125,23 +1159,24 @@ async function refreshLog() {
 setInterval(refreshLog, 2000);
 
 // ── Batch scan ──────────────────────────────────────────────────────
-let batchData = [];
-let batchTags = [];
+let batchData = [];   // Array of doc objects from API
+let batchTags = [];   // Array of Sets, per document
+let batchPages = [];  // Array of arrays of 1-indexed page numbers
+let allPreviews = []; // Base64 thumbs for every scanned page
 
 async function doBatchScan() {
   setBusy(true, 'scanning');
   $('#results-card').style.display = 'none';
   $('#batch-results-card').style.display = 'none';
   try {
-    const auto = currentMode === 'auto';
-    const res = await fetch('/api/scan-batch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), auto}) });
+    // Batch always shows review modal for page rearrangement
+    const res = await fetch('/api/scan-batch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), auto: false}) });
     const start = await res.json();
     if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
     const job = await pollJob();
     if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
     else if (job.status === 'done' && job.result && job.result.batch) {
-      if (auto) { showBatchResults(job.result.documents); }
-      else { showBatchModal(job.result.documents); }
+      showBatchModal(job.result);
     }
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
@@ -1154,29 +1189,67 @@ function showBatchResults(docs) {
   const list = $('#batch-results-list');
   list.innerHTML = '';
   const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
-  docs.forEach((doc, i) => {
+  docs.forEach(doc => {
     const li = document.createElement('li');
     const name = doc.filename || (doc.output_path || '').split('/').pop() || 'document';
     const detail = [doc.folder || doc.category, doc.summary].filter(Boolean).join(' \u2014 ');
-    const pages = doc.pages ? 'Pages ' + doc.pages.join(', ') : '';
-    li.innerHTML = '<span class="br-name">' + esc(name) + '</span>' + (pages ? ' <span class="br-detail">(' + esc(pages) + ')</span>' : '') + (detail ? '<br><span class="br-detail">' + esc(detail) + '</span>' : '');
+    li.innerHTML = '<span class="br-name">' + esc(name) + '</span>' + (detail ? '<br><span class="br-detail">' + esc(detail) + '</span>' : '');
     list.appendChild(li);
   });
 }
 
-function showBatchModal(docs) {
+function showBatchModal(result) {
+  const docs = result.documents;
+  allPreviews = result.all_previews || [];
   batchData = docs;
   batchTags = docs.map(d => new Set(d.tags || []));
-  $('#batch-count').textContent = docs.length;
+  batchPages = docs.map(d => [...(d.pages || [])]);
+  renderBatchDocs();
+  $('#batch-modal').classList.add('active');
+}
+
+function renderBatchDocs() {
+  // Preserve user-edited filenames and folders before re-rendering
+  const savedFn = {}, savedFolder = {};
+  batchData.forEach((_, i) => {
+    const fnEl = $('#batch-fn-' + i), folderEl = $('#batch-folder-' + i);
+    if (fnEl) savedFn[i] = fnEl.value;
+    if (folderEl) savedFolder[i] = folderEl.value;
+  });
+
+  const docsWithPages = batchPages.filter(p => p.length > 0).length;
+  $('#batch-count').textContent = docsWithPages;
   const container = $('#batch-docs');
   container.innerHTML = '';
   const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+  const numDocs = batchData.length;
 
-  docs.forEach((doc, i) => {
+  batchData.forEach((doc, i) => {
     const card = document.createElement('div');
     card.className = 'batch-doc';
+    card.dataset.docIdx = i;
 
-    let tagsHtml = (doc.tags || []).map(t =>
+    // Page thumbnails with drag-and-drop + move select
+    let pagesHtml = '';
+    const pages = batchPages[i] || [];
+    if (pages.length === 0) {
+      pagesHtml = '<div class="batch-page-grid-empty">No pages \u2014 drag pages here or remove this document</div>';
+    }
+    pages.forEach(pNum => {
+      const preview = allPreviews[pNum - 1] || '';
+      let moveOpts = '';
+      for (let d = 0; d < numDocs; d++) {
+        moveOpts += '<option value="' + d + '"' + (d === i ? ' selected' : '') + '>Doc ' + (d + 1) + '</option>';
+      }
+      moveOpts += '<option value="new">+ New doc</option>';
+      pagesHtml += '<div class="batch-page" draggable="true" data-page="' + pNum + '" data-doc="' + i + '">' +
+        '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '">' +
+        '<span>Page ' + pNum + '</span>' +
+        '<select class="batch-page-move" data-page="' + pNum + '" data-doc="' + i + '" aria-label="Move page ' + pNum + '">' + moveOpts + '</select>' +
+        '</div>';
+    });
+
+    let tagsHtml = [...(batchTags[i] || [])].map(t =>
       '<button class="batch-tag selected" data-doc="' + i + '" data-tag="' + esc(t) + '" aria-pressed="true">' + esc(t) + '</button>'
     ).join('');
 
@@ -1187,26 +1260,88 @@ function showBatchModal(docs) {
       riskHtml = '<div class="risk-alert risk-' + esc(doc.risk_level) + '" style="margin-top:8px"><h4>' + (icons[doc.risk_level]||'') + ' ' + esc(labels[doc.risk_level]||doc.risk_level) + '</h4><ul>' + doc.risks.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul></div>';
     }
 
-    card.innerHTML = '<div class="batch-doc-head">' +
-      '<img class="batch-doc-thumb" src="data:image/jpeg;base64,' + (doc.preview || '') + '" alt="Page preview">' +
-      '<div class="batch-doc-body">' +
-        '<div class="batch-doc-pages">Pages ' + esc((doc.pages || []).join(', ')) + '</div>' +
-        '<div class="batch-doc-summary">' + esc(doc.summary || '') + '</div>' +
-        '<div class="batch-fields">' +
-          '<label>Filename</label><input type="text" id="batch-fn-' + i + '" value="' + esc(doc.filename || '') + '">' +
-          '<label>Folder</label><input type="text" id="batch-folder-' + i + '" value="' + esc(doc.category || 'other') + '" list="folder-suggestions">' +
-          '<label>Tags</label><div class="batch-tag-grid" id="batch-tags-' + i + '">' + tagsHtml + '</div>' +
+    const fn = i in savedFn ? savedFn[i] : (doc.filename || '');
+    const folder = i in savedFolder ? savedFolder[i] : (doc.category || 'other');
+
+    card.innerHTML =
+      '<div class="batch-doc-head">' +
+        '<div class="batch-doc-title">' +
+          '<span class="batch-doc-label">Document ' + (i + 1) + (doc.summary ? ' \u2014 ' + esc(doc.summary) : '') + '</span>' +
+          (pages.length === 0 ? '<button class="btn-remove-doc" onclick="removeBatchDoc(' + i + ')">Remove</button>' : '') +
         '</div>' +
-        riskHtml +
-      '</div></div>';
+      '</div>' +
+      '<div class="batch-page-grid" data-doc="' + i + '">' + pagesHtml + '</div>' +
+      '<div class="batch-fields">' +
+        '<label>Filename</label><input type="text" id="batch-fn-' + i + '" value="' + esc(fn) + '">' +
+        '<label>Folder</label><input type="text" id="batch-folder-' + i + '" value="' + esc(folder) + '" list="folder-suggestions">' +
+        '<label>Tags</label><div class="batch-tag-grid" id="batch-tags-' + i + '">' + tagsHtml + '</div>' +
+      '</div>' +
+      riskHtml;
+
     container.appendChild(card);
   });
 
+  // "Add Document" button
+  const addBtn = document.createElement('button');
+  addBtn.className = 'btn-add-doc';
+  addBtn.textContent = '+ Add Document Group';
+  addBtn.onclick = addBatchDocument;
+  container.appendChild(addBtn);
+
   updateBatchSaveBtn();
-  $('#batch-modal').classList.add('active');
+  initBatchDragDrop();
 }
 
-// Event delegation for batch tag toggling
+function initBatchDragDrop() {
+  // Draggable pages
+  document.querySelectorAll('.batch-page[draggable]').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', JSON.stringify({page: parseInt(el.dataset.page), fromDoc: parseInt(el.dataset.doc)}));
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => el.classList.remove('dragging'));
+  });
+  // Drop zones
+  document.querySelectorAll('.batch-page-grid').forEach(grid => {
+    grid.addEventListener('dragover', e => { e.preventDefault(); grid.classList.add('drop-target'); });
+    grid.addEventListener('dragleave', e => { if (!grid.contains(e.relatedTarget)) grid.classList.remove('drop-target'); });
+    grid.addEventListener('drop', e => {
+      e.preventDefault();
+      grid.classList.remove('drop-target');
+      try {
+        const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+        const toDoc = parseInt(grid.dataset.doc);
+        if (data.fromDoc !== toDoc) movePage(data.page, data.fromDoc, toDoc);
+      } catch(err) {}
+    });
+  });
+}
+
+function movePage(pageNum, fromDoc, toDoc) {
+  const idx = batchPages[fromDoc].indexOf(pageNum);
+  if (idx === -1) return;
+  batchPages[fromDoc].splice(idx, 1);
+  batchPages[toDoc].push(pageNum);
+  batchPages[toDoc].sort((a, b) => a - b);
+  renderBatchDocs();
+}
+
+function addBatchDocument() {
+  batchData.push({category: 'other', filename: '', summary: '', tags: [], risks: [], risk_level: 'none'});
+  batchTags.push(new Set());
+  batchPages.push([]);
+  renderBatchDocs();
+}
+
+function removeBatchDoc(idx) {
+  if (batchPages[idx] && batchPages[idx].length > 0) return; // Can't remove doc with pages
+  batchData.splice(idx, 1);
+  batchTags.splice(idx, 1);
+  batchPages.splice(idx, 1);
+  renderBatchDocs();
+}
+
+// Event delegation: batch tag toggling
 document.addEventListener('click', e => {
   const btn = e.target.closest('.batch-tag');
   if (!btn) return;
@@ -1221,22 +1356,44 @@ document.addEventListener('click', e => {
     btn.classList.add('selected');
     btn.setAttribute('aria-pressed', 'true');
   }
-  updateBatchSaveBtn();
+});
+
+// Event delegation: page move select
+document.addEventListener('change', e => {
+  if (!e.target.classList.contains('batch-page-move')) return;
+  const pageNum = parseInt(e.target.dataset.page);
+  const fromDoc = parseInt(e.target.dataset.doc);
+  const toDoc = e.target.value;
+  if (toDoc === 'new') {
+    addBatchDocument();
+    movePage(pageNum, fromDoc, batchData.length - 1);
+  } else {
+    const to = parseInt(toDoc);
+    if (to !== fromDoc) movePage(pageNum, fromDoc, to);
+  }
 });
 
 function updateBatchSaveBtn() {
-  $('#btn-save-batch').textContent = 'Save All (' + batchData.length + ' document' + (batchData.length !== 1 ? 's' : '') + ')';
+  const docsWithPages = batchPages.filter(p => p.length > 0).length;
+  $('#btn-save-batch').textContent = 'Save All (' + docsWithPages + ' document' + (docsWithPages !== 1 ? 's' : '') + ')';
 }
 
 function cancelBatch() { $('#batch-modal').classList.remove('active'); }
 
 async function saveBatch() {
   $('#btn-save-batch').disabled = true;
-  const documents = batchData.map((doc, i) => ({
-    folder: ($('#batch-folder-' + i) || {}).value || doc.category,
-    tags: [...batchTags[i]],
-    filename: ($('#batch-fn-' + i) || {}).value || doc.filename,
-  }));
+  const documents = [];
+  batchData.forEach((doc, i) => {
+    if (!batchPages[i] || batchPages[i].length === 0) return; // Skip empty docs
+    documents.push({
+      pages: batchPages[i],
+      folder: ($('#batch-folder-' + i) || {}).value || doc.category || 'other',
+      tags: [...(batchTags[i] || [])],
+      filename: ($('#batch-fn-' + i) || {}).value || doc.filename,
+      summary: doc.summary || '',
+      date: doc.date || null,
+    });
+  });
   try {
     const res = await fetch('/api/save-batch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({documents, output_dir: $('#output-dir').value}) });
     const data = await res.json();
@@ -1247,6 +1404,11 @@ async function saveBatch() {
   } catch(e) { alert('Failed: ' + e.message); }
   $('#btn-save-batch').disabled = false;
   refreshLog();
+}
+
+function clearResults() {
+  $('#results-card').style.display = 'none';
+  $('#batch-results-card').style.display = 'none';
 }
 
 // Keyboard: Escape closes modals
