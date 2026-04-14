@@ -745,7 +745,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
   .card h2 { font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gray); margin-bottom: 12px; }
   label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: var(--gray); }
-  input[type="text"], select { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; font-family: var(--font); }
+  input[type="text"], select { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; font-family: var(--font); background-color: var(--card); color: #212529; }
+  select { appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23495057' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; cursor: pointer; }
+  select:hover { border-color: #adb5bd; }
   input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); box-shadow: var(--focus-ring); }
   .row { display: flex; gap: 12px; margin-bottom: 10px; }
   .row > * { flex: 1; }
@@ -766,6 +768,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .status { font-size: 13px; padding: 6px 0; }
   .status.connected { color: var(--green); font-weight: 600; }
   .status.disconnected { color: var(--gray-light); }
+  .scanner-info { display: none; margin-top: 12px; padding: 12px 16px; background: var(--green-bg); border-radius: 8px; align-items: center; gap: 12px; }
+  .scanner-info.visible { display: flex; }
+  .scanner-info svg { flex-shrink: 0; color: var(--green); }
+  .scanner-info-text { flex: 1; min-width: 0; }
+  .scanner-info-name { font-size: 14px; font-weight: 700; color: #0a3622; }
+  .scanner-info-detail { font-size: 12px; color: #1a6b43; margin-top: 1px; }
   .status.error { color: var(--red); font-weight: 600; }
   .results-grid { display: grid; grid-template-columns: 100px 1fr; gap: 4px 12px; font-size: 14px; }
   .results-grid dt { font-weight: 600; color: var(--gray); }
@@ -921,6 +929,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <button class="btn btn-primary btn-connect" onclick="connect()">Connect</button>
     </div>
     <div class="status disconnected" id="scanner-status" role="status" aria-live="polite">Not connected</div>
+    <div class="scanner-info" id="scanner-info">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="2"/><path d="M6 8V5a1 1 0 011-1h10a1 1 0 011 1v3"/><path d="M6 16v2a1 1 0 001 1h10a1 1 0 001-1v-2"/><circle cx="17" cy="12" r="1" fill="currentColor"/></svg>
+      <div class="scanner-info-text">
+        <div class="scanner-info-name" id="scanner-info-name"></div>
+        <div class="scanner-info-detail" id="scanner-info-detail"></div>
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -1231,12 +1246,26 @@ async function discoverScanners() {
 async function connect() {
   const ip = $('#scanner-ip').value.trim();
   const st = $('#scanner-status');
+  const info = $('#scanner-info');
   st.textContent = 'Connecting...'; st.className = 'status disconnected';
+  info.classList.remove('visible');
   try {
     const res = await fetch('/api/connect', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ip}) });
     const data = await res.json();
-    if (data.ok) { st.textContent = data.name + ' \u2014 ' + data.state; st.className = 'status connected'; $('#btn-classify').disabled = false; $('#btn-scan').disabled = false; $('#btn-batch').disabled = false; saveSettings(); }
-    else { st.textContent = 'Error: ' + data.error; st.className = 'status error'; }
+    if (data.ok) {
+      st.textContent = 'Connected'; st.className = 'status connected';
+      $('#scanner-info-name').textContent = data.name;
+      const details = [data.ip];
+      if (data.state) details.push(data.state);
+      if (data.adf) details.push('ADF: ' + data.adf.replace('ScannerAdf', ''));
+      if (data.sources) details.push('Sources: ' + data.sources.join(', '));
+      $('#scanner-info-detail').textContent = details.join(' \u00b7 ');
+      info.classList.add('visible');
+      $('#btn-classify').disabled = false; $('#btn-scan').disabled = false; $('#btn-batch').disabled = false;
+      saveSettings();
+    } else {
+      st.textContent = 'Error: ' + data.error; st.className = 'status error';
+    }
   } catch(e) { st.textContent = 'Failed: ' + e.message; st.className = 'status error'; }
   refreshLog();
 }
