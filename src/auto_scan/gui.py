@@ -572,12 +572,14 @@ def _run_scan_job(data: dict, mode: str):
             all_redacted_types = set()
             redaction_skipped = False
             skip_reason = ""
+            redacted_previews = {}  # page (1-indexed) -> redacted JPEG bytes
             for idx, img_data in enumerate(images):
                 r = redact_image(img_data, enabled_patterns=redact_pats)
                 total_redactions += r.redaction_count
                 all_redacted_types.update(r.redacted_types)
                 if r.redaction_count > 0:
                     page_redactions[idx + 1] = {"count": r.redaction_count, "types": r.redacted_types}
+                    redacted_previews[idx + 1] = r.redacted_image
                 if r.skipped:
                     redaction_skipped = True
                     skip_reason = r.skip_reason
@@ -605,6 +607,7 @@ def _run_scan_job(data: dict, mode: str):
                 state["job"]["status"] = "confirm_send"
                 state["job"]["redaction"] = redaction_info
                 state["job"]["page_redactions"] = page_redactions
+                state["_redacted_previews"] = redacted_previews
 
             # Wait for user to confirm or cancel
             _log("Waiting for user confirmation...")
@@ -855,6 +858,29 @@ def api_page_image(page_num):
         return "Not found", 404
     img_data = images[page_num - 1]
     thumb = _make_thumbnail(img_data, max_dim=1200)
+    return Response(thumb, mimetype="image/jpeg")
+
+
+@app.route("/api/redacted-image/<int:page_num>")
+def api_redacted_image(page_num):
+    """Serve redacted version of a page during privacy check. page_num is 1-indexed."""
+    with _state_lock:
+        previews = state.get("_redacted_previews", {})
+    img_data = previews.get(page_num)
+    if not img_data:
+        return "Not found", 404
+    thumb = _make_thumbnail(img_data, max_dim=1200)
+    return Response(thumb, mimetype="image/jpeg")
+
+
+@app.route("/api/original-image/<int:page_num>")
+def api_original_image(page_num):
+    """Serve original (unredacted) page image during privacy check. page_num is 1-indexed."""
+    with _state_lock:
+        images = state.get("pending_images")
+    if not images or page_num < 1 or page_num > len(images):
+        return "Not found", 404
+    thumb = _make_thumbnail(images[page_num - 1], max_dim=1200)
     return Response(thumb, mimetype="image/jpeg")
 
 
@@ -1214,6 +1240,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .lightbox.active { display: flex; }
   .lightbox img { max-width: min(92vw, 1200px); max-height: 85vh; border-radius: var(--radius); box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; }
   .lightbox-label { color: #fff; font-size: 15px; font-weight: 600; margin-top: 12px; }
+  .redact-preview-split { display: flex; gap: 16px; align-items: flex-start; max-width: 95vw; }
+  .redact-preview-pane { flex: 1; text-align: center; min-width: 0; }
+  .redact-preview-pane img { max-width: 100%; max-height: 70vh; border-radius: 4px; border: 2px solid rgba(255,255,255,.15); }
+  .redact-preview-label { color: rgba(255,255,255,.7); font-size: 13px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
   .lightbox-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(255,255,255,.15); border: none; color: #fff; font-size: 32px; width: 48px; height: 48px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background var(--transition); }
   .lightbox-nav:hover { background: rgba(255,255,255,.3); }
   .lightbox-nav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
@@ -1621,6 +1651,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="lightbox-label" id="lightbox-label"></div>
 </div>
 
+<!-- Redaction Preview Modal -->
+<div class="lightbox" id="redact-preview" role="dialog" aria-modal="true" aria-label="Redaction preview">
+  <button class="lightbox-close" onclick="closeRedactPreview()" aria-label="Close preview">&times;</button>
+  <button class="lightbox-nav lightbox-prev" onclick="redactPreviewNav(-1)" aria-label="Previous page">&#8249;</button>
+  <button class="lightbox-nav lightbox-next" onclick="redactPreviewNav(1)" aria-label="Next page">&#8250;</button>
+  <div class="redact-preview-split">
+    <div class="redact-preview-pane">
+      <div class="redact-preview-label">Original</div>
+      <img id="redact-preview-orig" src="" alt="Original page">
+    </div>
+    <div class="redact-preview-pane">
+      <div class="redact-preview-label">Redacted (sent to AI)</div>
+      <img id="redact-preview-redacted" src="" alt="Redacted page">
+    </div>
+  </div>
+  <div class="lightbox-label" id="redact-preview-info"></div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
 const mainContent = document.getElementById('main-content');
@@ -1872,7 +1920,8 @@ function showRedactWarning(job) {
   if (r.status === 'clean') {
     setPipeStep('pipe-ocr', 'done', 'No sensitive data found');
   } else if (r.status === 'redacted') {
-    setPipeStep('pipe-ocr', 'warning', r.count + ' region(s) redacted');
+    setPipeStep('pipe-ocr', 'warning');
+    setPipeDetail('pipe-ocr', r.count + ' region(s) redacted <a href="#" onclick="openRedactPreview(); return false" style="color:#FDE68A;text-decoration:underline">view</a>');
   } else {
     setPipeStep('pipe-ocr', 'error', 'Could not run');
   }
@@ -1892,11 +1941,14 @@ function showRedactWarning(job) {
       '</div>';
   } else if (r.status === 'redacted') {
     const types = (r.types || []).join(', ');
+    // Store redacted page numbers for the preview
+    _redactedPages = Object.keys(job.page_redactions || {}).map(Number).sort((a,b) => a - b);
     alertEl.className = 'redact-alert redact-redacted';
     alertEl.innerHTML =
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
         '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' +
         '<strong>' + r.count + ' region(s) redacted</strong>' +
+        '<a href="#" onclick="openRedactPreview(); return false" style="font-size:12px;color:#93C5FD;margin-left:8px">View redactions \u2192</a>' +
       '</div>' +
       '<div style="font-size:12px;margin-bottom:8px;opacity:.85">Detected: ' + types + ' \u2014 blacked out before sending</div>' +
       '<div style="display:flex;gap:8px">' +
@@ -2842,18 +2894,54 @@ function lightboxNav(dir) {
   showLightboxPage();
 }
 
+// ── Redaction preview (before/after comparison) ────────────────────
+let _redactedPages = []; // page numbers that have redactions
+let _redactPreviewIdx = 0;
+
+function openRedactPreview() {
+  if (_redactedPages.length === 0) return;
+  _redactPreviewIdx = 0;
+  showRedactPreviewPage();
+  $('#redact-preview').classList.add('active');
+  mainContent.setAttribute('inert', '');
+}
+
+function closeRedactPreview() {
+  $('#redact-preview').classList.remove('active');
+  if (!document.querySelector('.modal-overlay.active') && !$('#lightbox').classList.contains('active'))
+    mainContent.removeAttribute('inert');
+}
+
+function showRedactPreviewPage() {
+  const pNum = _redactedPages[_redactPreviewIdx];
+  $('#redact-preview-orig').src = '/api/original-image/' + pNum;
+  $('#redact-preview-redacted').src = '/api/redacted-image/' + pNum;
+  $('#redact-preview-info').textContent = 'Page ' + pNum + ' (' + (_redactPreviewIdx + 1) + '/' + _redactedPages.length + ')';
+}
+
+function redactPreviewNav(dir) {
+  _redactPreviewIdx = (_redactPreviewIdx + dir + _redactedPages.length) % _redactedPages.length;
+  showRedactPreviewPage();
+}
+
+$('#redact-preview').addEventListener('click', e => { if (e.target === $('#redact-preview')) closeRedactPreview(); });
+
 // Click lightbox background to close (but not on image or buttons)
 $('#lightbox').addEventListener('click', e => { if (e.target === $('#lightbox')) closeLightbox(); });
 
 // Keyboard: Escape closes modals / lightbox, arrows navigate lightbox
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    if ($('#lightbox').classList.contains('active')) { closeLightbox(); }
+    if ($('#redact-preview').classList.contains('active')) { closeRedactPreview(); }
+    else if ($('#lightbox').classList.contains('active')) { closeLightbox(); }
     else if ($('#batch-modal').classList.contains('active')) { cancelBatch(); }
     else if ($('#classify-modal').classList.contains('active')) { cancelClassify(); }
     else if ($('#api-key-modal').classList.contains('active')) { closeApiModal(); }
   }
-  if ($('#lightbox').classList.contains('active')) {
+  if ($('#redact-preview').classList.contains('active')) {
+    if (e.key === 'ArrowLeft') redactPreviewNav(-1);
+    if (e.key === 'ArrowRight') redactPreviewNav(1);
+  } else if ($('#lightbox').classList.contains('active')) {
     if (e.key === 'ArrowLeft') lightboxNav(-1);
     if (e.key === 'ArrowRight') lightboxNav(1);
   }
