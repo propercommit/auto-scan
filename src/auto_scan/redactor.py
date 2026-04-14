@@ -20,8 +20,8 @@ from PIL import Image, ImageDraw, ImageFilter
 PATTERNS: dict[str, re.Pattern] = {
     # Social Security Numbers (US) — exclude invalid ranges (000/666/9xx area, 00 group, 0000 serial)
     "ssn": re.compile(r"\b(?!000|666|9\d\d)\d{3}[-.\s]?(?!00)\d{2}[-.\s]?(?!0000)\d{4}\b"),
-    # Swiss AHV/AVS number: 756.XXXX.XXXX.XX
-    "ahv": re.compile(r"\b756[.\s]?\d{4}[.\s]?\d{4}[.\s]?\d{2}\b"),
+    # Swiss AHV/AVS number: 756.XXXX.XXXX.XX — tolerate OCR-inserted spaces around dots
+    "ahv": re.compile(r"\b756\s?[.\s]\s?\d{4}\s?[.\s]\s?\d{4}\s?[.\s]\s?\d{2}\b"),
     # Credit card numbers (13-19 digits, optionally grouped) — Luhn validated in _luhn_check
     "credit_card": re.compile(
         r"\b(?:\d{4}[-\s]?){3,4}\d{1,4}\b"
@@ -30,8 +30,8 @@ PATTERNS: dict[str, re.Pattern] = {
     "iban": re.compile(r"\b[A-Z]{2}\d{2}[\s]?[\dA-Z]{4}[\s]?(?:[\dA-Z]{4}[\s]?){1,7}[\dA-Z]{1,4}\b"),
     # Phone numbers (international or local with various separators)
     "phone": re.compile(r"\b(?:\+\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{2,4}[-.\s]?\d{0,4}\b"),
-    # Email addresses
-    "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
+    # Email addresses — tolerate OCR-inserted spaces around @
+    "email": re.compile(r"\b[A-Za-z0-9._%+-]+\s?@\s?[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
     # Date of birth patterns (DD/MM/YYYY, DD.MM.YYYY, etc.)
     "dob": re.compile(r"\b\d{1,2}[./]\d{1,2}[./]\d{4}\b"),
     # Passport numbers (common formats)
