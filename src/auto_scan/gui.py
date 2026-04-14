@@ -1488,10 +1488,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="ahv" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> AHV/AVS (Swiss)</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="credit_card" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Credit card numbers</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="iban" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> IBAN</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="phone" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Phone numbers</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="email" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Email addresses</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="dob" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Dates of birth</label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" value="passport" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Passport numbers</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="phone" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Phone numbers</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="email" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Email addresses</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="dob" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Dates of birth</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" value="passport" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Passport numbers</label>
       </div>
     </div>
     <div style="margin-top:10px">

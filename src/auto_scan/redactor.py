@@ -38,8 +38,8 @@ PATTERNS: dict[str, re.Pattern] = {
     "passport": re.compile(r"\b[A-Z]\d{7,8}\b"),
 }
 
-# Default: redact high-risk patterns. Phone/email/dob are optional.
-DEFAULT_ENABLED = {"ssn", "ahv", "credit_card", "iban"}
+# Default: redact all patterns.
+DEFAULT_ENABLED = {"ssn", "ahv", "credit_card", "iban", "phone", "email", "dob", "passport"}
 
 
 @dataclass

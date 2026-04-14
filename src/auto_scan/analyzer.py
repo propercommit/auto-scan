@@ -21,21 +21,32 @@ ALL_CATEGORIES = [
     "invoice", "receipt", "contract", "letter", "medical", "tax",
     "insurance", "bank", "government", "personal", "automobile",
     "housing", "education", "employment", "travel", "utilities",
+    "legal", "warranty", "subscription", "donation", "investment",
+    "pension", "certificate", "permit", "registration", "membership",
     "manual", "other",
 ]
 
 ANALYSIS_PROMPT = """\
-Analyze this scanned document. Return ONLY valid JSON (no markdown):
+You are a document classification expert. Analyze this scanned document carefully.
 
-"category": one of: {categories}
-"filename": YYYY-MM-DD_category_who_what_details.pdf — include entity names, product/model, amounts, ref numbers. Examples: "2022-06-10_contract_bmw_x3_g01_sale.pdf", "2024-03-15_invoice_vodafone_march_89eur.pdf". Use doc date if visible, else {today}. Lowercase, underscores.
-"summary": one sentence
+Read the ENTIRE document — headers, footers, letterheads, logos, stamps, handwriting, tables, fine print. Identify:
+- What TYPE of document this is (invoice, contract, insurance policy, medical record, bank statement, tax form, certificate, permit, letter, receipt, etc.)
+- WHO issued it (company, organization, government body, individual)
+- WHO is it addressed to or about
+- WHAT is the subject (product, service, transaction, claim, application, etc.)
+- KEY identifiers: reference numbers, policy numbers, invoice numbers, dates, amounts
+
+Return ONLY valid JSON (no markdown):
+
+"category": pick the best match from [{categories}]. If none fits well, use "other" and let the filename be descriptive.
+"filename": YYYY-MM-DD_category_who_what_details.pdf — be as specific as possible. Include entity names, product/model names, amounts, ref numbers. Examples: "2022-06-10_contract_bmw_x3_g01_sale.pdf", "2024-03-15_invoice_vodafone_march_89eur.pdf", "2025-01-20_insurance_axa_home_policy_renewal.pdf", "2024-11-05_medical_dr_mueller_blood_test_results.pdf". Use the document date if visible, otherwise {today}. Lowercase, underscores, no special characters.
+"summary": one clear sentence describing the document
 "date": YYYY-MM-DD or null
-"key_fields": relevant extracted key-value pairs (vendor, amount, parties, ref numbers, etc.)
-"suggested_categories": 3-5 best matching categories from the list above
-"tags": 5-15 lowercase keywords from the content — type, companies, people, products, models, topics. E.g. BMW X3 sale: ["contract","sales","bmw","x3","g01","automobile","purchase"]
+"key_fields": relevant extracted key-value pairs (vendor, amount, parties, ref numbers, policy numbers, account numbers, etc.)
+"suggested_categories": 3-5 best matching categories from the list above, ordered by relevance
+"tags": 5-15 lowercase keywords from the actual content — document type, company names, people names, product/model names, topics, amounts, locations. Be specific, not generic.
 "risk_level": "none"|"low"|"medium"|"high"
-"risks": [] if clean, else short strings flagging: scams, misleading terms, hidden fees, unfair clauses, inconsistencies, phishing signals"""
+"risks": [] if clean, else short strings flagging: scams, misleading terms, hidden fees, unfair clauses, inconsistencies, phishing signals, unusual urgency"""
 
 
 @dataclass
@@ -275,50 +286,68 @@ def _repair_truncated_json(text: str) -> str:
 # ── Batch analysis ──────────────────────────────────────────────────
 
 BATCH_ANALYSIS_PROMPT = """\
-You are a document sorting expert. You have {num_pages} scanned pages from a mixed stack. Pages from DIFFERENT documents may be shuffled together. Each image is labeled with its page number in the top-left corner.
+You are a document sorting and classification expert. You receive {num_pages} scanned pages from a mixed stack fed through an automatic document feeder. Pages from DIFFERENT documents are likely shuffled together. Each image is labeled with its page number in the top-left corner.
 
-═══ STEP 1: READ EVERY PAGE ═══
-For each page, identify:
-  a) Document TYPE visible in the title/header (e.g. "Insurance Policy", "Sales Agreement", "Invoice", "Bank Statement")
-  b) Company/organization name in the letterhead or header
-  c) Reference/policy/contract/invoice NUMBER
-  d) Page numbering if visible (e.g. "Page 2 of 4")
-  e) The TOPIC — what is this page actually about?
+Your job: read every page, figure out which pages belong together as one document, and classify each document.
+
+═══ STEP 1: THOROUGHLY READ EVERY PAGE ═══
+For each page, carefully examine:
+  a) Document TYPE — what kind of document is this? (invoice, insurance policy, sales contract, bank statement, medical report, tax form, letter, certificate, permit, rental agreement, payslip, receipt, warranty card, prescription, court document, birth/marriage/death certificate, transcript, membership card, donation receipt, etc.)
+  b) Header/letterhead — company name, logo, organization, government body
+  c) Reference numbers — invoice #, policy #, contract #, order #, case #, account #, claim #, file #
+  d) Sender and recipient — who wrote this and to whom
+  e) Page numbering — "Page 2 of 4", "2/4", sequential numbering
+  f) Language and formatting — font, layout, paper style, stamps, signatures
+  g) Content topic — what is this page actually about?
 
 ═══ STEP 2: GROUP BY DOCUMENT IDENTITY ═══
 Two pages belong to the SAME document ONLY when ALL of these match:
-  - Same document TYPE (an insurance policy ≠ a sales contract, even from the same company)
-  - Same reference/policy/contract number
+  - Same document TYPE (an insurance policy ≠ a sales contract, even if from the same company)
+  - Same reference/policy/contract/invoice number
   - Same sender AND recipient pair
-  - Compatible page numbering (1,2,3 not 1,1)
-  - Same formatting and letterhead
+  - Compatible page numbering (page 1,2,3 — not two page 1s)
+  - Same formatting, letterhead, and visual style
+  - Continuous narrative or data (page 2 continues where page 1 left off)
 
 CRITICAL — these are ALWAYS separate documents:
-  ✗ An insurance document and a sales document → 2 docs, even if same company
-  ✗ A cover letter and the enclosed form → 2 docs
+  ✗ An insurance document and a sales contract → 2 docs, even if same company
+  ✗ A cover letter and the enclosed form or attachment → 2 docs
   ✗ Different document types with different headers → separate
-  ✗ Pages about different topics or transactions → separate
+  ✗ Pages about different topics, transactions, or time periods → separate
   ✗ A renewal notice and the original policy → 2 docs
+  ✗ A receipt and the invoice for the same purchase → 2 docs
+  ✗ Documents in different languages (unless clearly one bilingual document) → likely separate
+  ✗ A terms & conditions insert and the main document → 2 docs
 
-WHEN IN DOUBT → SPLIT. It is much better to over-split (too many small docs) than to wrongly merge pages from different documents.
+WHEN IN DOUBT → SPLIT. It is much better to over-split (create too many small documents) than to wrongly merge pages from different documents into one.
 
-The CONTENT and DOCUMENT TYPE on the page is the strongest signal. Two pages that say "Insurance" in the header must be grouped under insurance, not sales — regardless of what other pages look like.
+The CONTENT and DOCUMENT TYPE visible on the page is the strongest grouping signal. Trust what you see on each page, not assumptions about what "should" be together.
 
 ═══ STEP 3: CLASSIFY AND OUTPUT ═══
+For each document group, determine the best category, generate a descriptive filename, and extract key information.
+
 Return ONLY valid JSON (no markdown) — an array of document groups:
 
-[{{"pages": [1, 2], "page_confidence": {{"1": 95, "2": 80}}, "confidence": 87, "category": "...", "filename": "YYYY-MM-DD_cat_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
+[{{"pages": [1, 2], "page_confidence": {{"1": 95, "2": 80}}, "confidence": 87, "category": "...", "filename": "YYYY-MM-DD_category_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
 
 CONFIDENCE SCORING (0–100):
-  - "page_confidence": for EACH page, how certain you are it belongs to THIS document group (0–100)
-  - "confidence": overall confidence for the entire document grouping (average of page scores)
-  - 90–100: Very clear match (same header, reference number, formatting)
-  - 70–89: Likely match (similar content/style, but some ambiguity)
-  - 50–69: Uncertain (could belong to another document)
-  - 0–49: Very uncertain (weak evidence for this grouping)
+  - "page_confidence": for EACH page, how certain you are it belongs to THIS document group
+  - "confidence": overall confidence for the entire document grouping
+  - 90–100: Very clear — same header, reference number, continuous content
+  - 70–89: Likely — similar style and content, minor ambiguity
+  - 50–69: Uncertain — could plausibly belong to another group
+  - Below 50: Weak — little evidence for this grouping
+
+FILENAME RULES:
+  - Format: YYYY-MM-DD_category_who_what_details.pdf
+  - Be specific: include entity names, product names, amounts, reference numbers
+  - Examples: "2025-03-15_invoice_vodafone_march_89eur.pdf", "2024-06-10_contract_bmw_x3_sale.pdf", "2025-01-20_insurance_axa_home_policy_H847291.pdf", "2024-11-05_medical_dr_chen_referral_cardiology.pdf"
+  - Lowercase, underscores, no special characters
 
 Categories: {categories}
-Pages numbered 1–{num_pages}. Every page must appear in exactly one group. Use the document date if visible, otherwise {today}. Filenames: lowercase underscores, include entity names, amounts, ref numbers. Tags: 5-15 lowercase keywords from the content."""
+If none of these categories fits well, use "other" and make the filename descriptive.
+
+Pages numbered 1–{num_pages}. Every page must appear in exactly one group. Use the document date if visible, otherwise {today}. Tags: 5-15 lowercase keywords from actual content (entity names, product names, topics, amounts, locations — be specific, not generic)."""
 
 
 def analyze_batch(
