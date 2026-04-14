@@ -936,8 +936,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .btn-add-doc:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .btn-remove-doc { background: none; border: none; color: var(--red); font-size: 13px; cursor: pointer; font-weight: 600; font-family: var(--font); padding: 4px 10px; border-radius: 4px; transition: background var(--transition); }
   .btn-remove-doc:hover { background: #f8d7da; }
-  .btn-clear { margin-top: 12px; display: inline-block; font-size: 13px; font-weight: 600; color: var(--gray); background: none; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 14px; cursor: pointer; font-family: var(--font); transition: background var(--transition); }
-  .btn-clear:hover { background: #e9ecef; }
+  .btn-scan-next { margin-top: 16px; width: 100%; padding: 12px 20px; font-size: 15px; font-weight: 700; }
   .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 200; align-items: center; justify-content: center; flex-direction: column; cursor: pointer; }
   .lightbox.active { display: flex; }
   .lightbox img { max-width: min(92vw, 1200px); max-height: 85vh; border-radius: var(--radius); box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; }
@@ -1207,13 +1206,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </dl>
     <div class="risk-alert" id="r-risk" style="display:none"></div>
     <div class="output-path" id="r-path" style="display:none"></div>
-    <button class="btn-clear" onclick="clearResults()">Clear</button>
+    <button class="btn btn-primary btn-scan-next" onclick="scanNext()">Scan Next Documents</button>
   </div>
 
   <div class="card" id="batch-results-card" style="display:none" aria-live="polite">
     <h2 id="batch-results-title">Batch Complete</h2>
     <ul class="batch-results" id="batch-results-list"></ul>
-    <button class="btn-clear" onclick="clearResults()">Clear</button>
+    <button class="btn btn-primary btn-scan-next" onclick="scanNext()">Scan Next Documents</button>
   </div>
 
   <div class="card">
@@ -2259,9 +2258,15 @@ async function saveBatch() {
   refreshLog();
 }
 
-function clearResults() {
+function scanNext() {
   $('#results-card').style.display = 'none';
   $('#batch-results-card').style.display = 'none';
+  // Reset result fields
+  ['#r-folder','#r-tags','#r-filename','#r-summary','#r-date'].forEach(s => { const el = $(s); if (el) el.textContent = '--'; });
+  const riskEl = $('#r-risk'); if (riskEl) { riskEl.style.display = 'none'; riskEl.innerHTML = ''; }
+  const pathEl = $('#r-path'); if (pathEl) { pathEl.style.display = 'none'; pathEl.innerHTML = ''; }
+  $('#batch-results-list').innerHTML = '';
+  window.scrollTo({top: 0, behavior: 'smooth'});
 }
 
 // ── Lightbox (fullscreen page preview) ──────────────────────────────
