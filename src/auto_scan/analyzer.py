@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import date
@@ -155,13 +156,20 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     )
 
     # Parse the JSON response
-    response_text = message.content[0].text.strip()
+    response_text = ""
+    for block in message.content:
+        if hasattr(block, "text"):
+            response_text += block.text
+    response_text = response_text.strip()
 
     # Strip markdown code fences if present
     if response_text.startswith("```"):
         lines = response_text.split("\n")
-        lines = [l for l in lines if not l.startswith("```")]
-        response_text = "\n".join(lines)
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        response_text = "\n".join(lines).strip()
 
     try:
         data = json.loads(response_text)
@@ -191,6 +199,28 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
         print(f"  Risk:     {doc_info.risk_level} ({len(doc_info.risks)} issue(s))", file=sys.stderr)
 
     return doc_info
+
+
+def _repair_truncated_json(text: str) -> str:
+    """Attempt to repair JSON truncated by max_tokens.
+
+    Finds the last complete object in an array and closes the array.
+    """
+    # Find the last complete object by looking for the last "},"  or "}" before truncation
+    # Strategy: try progressively shorter prefixes until one parses
+    # First try: close any open strings, objects, arrays
+    for trim in range(min(200, len(text)), 0, -1):
+        candidate = text[:len(text) - trim]
+        # Find last complete }, then close the array
+        last_brace = candidate.rfind("}")
+        if last_brace > 0:
+            attempt = candidate[:last_brace + 1].rstrip().rstrip(",") + "]"
+            try:
+                json.loads(attempt)
+                return attempt
+            except json.JSONDecodeError:
+                continue
+    return text  # give up, return as-is
 
 
 # ── Batch analysis ──────────────────────────────────────────────────
@@ -268,7 +298,7 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
     try:
         message = client.messages.create(
             model=config.claude_model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=(
                 "You are a professional document classification system. "
                 "READ the actual text content on every page — titles, headers, "
@@ -291,21 +321,51 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
         file=sys.stderr,
     )
 
-    response_text = message.content[0].text.strip()
+    # Extract text from response — handle multiple content blocks
+    response_text = ""
+    for block in message.content:
+        if hasattr(block, "text"):
+            response_text += block.text
+    response_text = response_text.strip()
+
+    if not response_text:
+        stop = message.stop_reason
+        raise AnalysisError(
+            f"Empty response from Claude (stop_reason={stop}). "
+            f"The document may be too large — try scanning fewer pages."
+        )
+
+    # Strip markdown code fences
     if response_text.startswith("```"):
+        # Remove opening fence (```json or ```) and closing fence
         lines = response_text.split("\n")
-        lines = [l for l in lines if not l.startswith("```")]
-        response_text = "\n".join(lines)
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        response_text = "\n".join(lines).strip()
+
+    # Handle truncated JSON (max_tokens hit)
+    if message.stop_reason == "max_tokens":
+        print("  Warning: response truncated (max_tokens), attempting repair", file=sys.stderr)
+        # Try to close any open arrays/objects
+        response_text = _repair_truncated_json(response_text)
 
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError as e:
+        # Log first 500 chars for debugging
+        preview = response_text[:500] if response_text else "(empty)"
         raise AnalysisError(
-            f"Failed to parse batch response: {e}\n{response_text}"
+            f"Failed to parse batch response: {e}\nResponse preview: {preview}"
         ) from e
 
     if not isinstance(data, list):
-        raise AnalysisError(f"Expected JSON array from batch analysis, got {type(data).__name__}")
+        # If it's a single object, wrap it
+        if isinstance(data, dict) and "pages" in data:
+            data = [data]
+        else:
+            raise AnalysisError(f"Expected JSON array from batch analysis, got {type(data).__name__}")
 
     results = []
     for doc in data:
