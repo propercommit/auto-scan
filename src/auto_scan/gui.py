@@ -471,10 +471,8 @@ def api_reveal():
         return jsonify({"ok": False, "error": "File not found"}), 404
 
     # Only allow revealing files within the configured output directory
-    try:
-        output_dir = load_config().output_dir.resolve()
-    except Exception:
-        output_dir = Path("~/Documents/Scans").expanduser().resolve()
+    settings = _load_settings()
+    output_dir = Path(settings.get("output_dir", "~/Documents/Scans")).expanduser().resolve()
     if not str(path).startswith(str(output_dir)):
         return jsonify({"ok": False, "error": "Path is outside the output directory"}), 403
 
