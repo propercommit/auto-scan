@@ -424,6 +424,7 @@ def _run_scan_job(data: dict, mode: str):
         settings = _load_settings()
         daily_budget = float(settings.get("daily_budget", 0))
         redact = bool(settings.get("redact_enabled"))
+        reckless = bool(settings.get("reckless_mode"))
         redact_pats = set(settings.get("redact_patterns", "").split(",")) - {""} if redact else None
         if daily_budget > 0:
             usage = get_usage()
@@ -448,48 +449,64 @@ def _run_scan_job(data: dict, mode: str):
                 }
             return
 
-        # Pre-scan redaction check
-        if redact:
+        # ── Privacy check: run local OCR, redact, pause for confirmation ──
+        page_redactions = {}  # tracks which pages had redactions (1-indexed)
+        if redact and not reckless:
+            import time
             from auto_scan.redactor import redact_image
+
+            with _state_lock:
+                state["job"]["status"] = "checking_privacy"
+            _log("Running local OCR to check for sensitive data...")
+
             total_redactions = 0
             all_redacted_types = set()
             redaction_skipped = False
             skip_reason = ""
-            for img_data in images:
+            for idx, img_data in enumerate(images):
                 r = redact_image(img_data, enabled_patterns=redact_pats)
                 total_redactions += r.redaction_count
                 all_redacted_types.update(r.redacted_types)
+                if r.redaction_count > 0:
+                    page_redactions[idx + 1] = {"count": r.redaction_count, "types": r.redacted_types}
                 if r.skipped:
                     redaction_skipped = True
                     skip_reason = r.skip_reason
 
+            # Build redaction report and pause for user confirmation
             if redaction_skipped:
                 _log(f"Redaction SKIPPED: {skip_reason}")
-                with _state_lock:
-                    state["job"]["status"] = "confirm_send"
-                    state["job"]["redaction"] = {
-                        "skipped": True,
-                        "reason": skip_reason,
-                    }
-                # Wait for user to confirm or cancel
-                for _ in range(600):  # 10 min max wait
-                    import time
-                    time.sleep(1)
-                    with _state_lock:
-                        if state["job"].get("user_confirmed"):
-                            break
-                        if state["job"].get("user_cancelled"):
-                            _log("Scan cancelled by user — documents not sent to AI")
-                            state["job"] = {"status": "error", "result": {"ok": False, "error": "Cancelled: documents not sent to AI."}}
-                            return
-                _log("User confirmed — sending unredacted documents to AI")
+                redaction_info = {"status": "skipped", "reason": skip_reason}
             elif total_redactions > 0:
-                _log(f"Redacted {total_redactions} sensitive region(s) [{', '.join(sorted(all_redacted_types))}] before sending to AI")
+                _log(f"Found & redacted {total_redactions} sensitive region(s) [{', '.join(sorted(all_redacted_types))}]")
+                redaction_info = {
+                    "status": "redacted",
+                    "count": total_redactions,
+                    "types": sorted(all_redacted_types),
+                }
+            else:
+                _log("No sensitive data detected in scanned pages")
+                redaction_info = {"status": "clean"}
+
+            with _state_lock:
+                state["job"]["status"] = "confirm_send"
+                state["job"]["redaction"] = redaction_info
+                state["job"]["page_redactions"] = page_redactions
+
+            # Wait for user to confirm or cancel
+            for _ in range(600):  # 10 min max wait
+                time.sleep(1)
                 with _state_lock:
-                    state["job"]["redaction"] = {
-                        "count": total_redactions,
-                        "types": sorted(all_redacted_types),
-                    }
+                    if state["job"].get("user_confirmed"):
+                        break
+                    if state["job"].get("user_cancelled"):
+                        _log("Cancelled by user — documents not sent to AI")
+                        state["job"] = {
+                            "status": "error",
+                            "result": {"ok": False, "error": "Cancelled: documents not sent to AI."},
+                        }
+                        return
+            _log("User confirmed — sending to AI")
 
         if mode == "auto":
             classify = data.get("classify", True)
@@ -593,7 +610,7 @@ def _run_scan_job(data: dict, mode: str):
             with _state_lock:
                 state["job"] = {
                     "status": "done",
-                    "result": {"ok": True, "batch": True, "documents": saved},
+                    "result": {"ok": True, "batch": True, "documents": saved, "page_redactions": page_redactions},
                 }
 
         elif mode == "batch-assisted":
@@ -634,6 +651,7 @@ def _run_scan_job(data: dict, mode: str):
                         "ok": True, "batch": True,
                         "all_previews": all_previews,
                         "documents": docs,
+                        "page_redactions": page_redactions,
                     },
                 }
 
@@ -911,9 +929,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .scan-progress-pages { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
   .scan-progress-page { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; background: #1A1D2B; border-radius: 6px; font-size: 12px; font-family: var(--mono); color: #94A3B8; animation: fadeSlideIn .3s ease; }
   .scan-progress-page svg { color: #34D399; }
-  .redact-alert { margin-top: 10px; padding: 10px 14px; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.25); border-radius: 8px; font-size: 13px; color: #FCA5A5; display: flex; align-items: center; gap: 8px; }
-  .redact-alert svg { flex-shrink: 0; color: #F87171; }
-  .redact-alert.redact-warning { background: rgba(239,68,68,.18); border: 2px solid rgba(239,68,68,.5); padding: 16px 18px; flex-direction: column; }
+  .redact-alert { margin-top: 10px; padding: 16px 18px; border-radius: 8px; font-size: 13px; display: flex; align-items: flex-start; gap: 8px; flex-direction: column; }
+  .redact-alert svg { flex-shrink: 0; }
+  .redact-alert.redact-clean { background: #f0fdf4; border: 2px solid #86efac; color: #166534; }
+  .redact-alert.redact-clean svg { color: #22C55E; }
+  .redact-alert.redact-redacted { background: #fffbeb; border: 2px solid #fcd34d; color: #713f12; }
+  .redact-alert.redact-redacted svg { color: #F59E0B; }
+  .redact-alert.redact-warning { background: #fef2f2; border: 2px solid #fca5a5; color: #991b1b; }
+  .redact-alert.redact-warning svg { color: #EF4444; }
+  .ocr-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 6px; background: #dbeafe; color: #1e40af; position: absolute; top: 2px; left: 2px; z-index: 1; white-space: nowrap; }
+  .ocr-badge svg { width: 10px; height: 10px; }
+  .ocr-doc-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; background: #dbeafe; color: #1e40af; white-space: nowrap; flex-shrink: 0; }
+  .ocr-doc-badge svg { width: 12px; height: 12px; }
   @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border: none; border-radius: var(--radius); font-size: 15px; font-weight: 600; font-family: var(--font); cursor: pointer; transition: background var(--transition), box-shadow var(--transition), transform .1s; width: 100%; }
   .btn:hover:not(:disabled) { box-shadow: 0 2px 8px rgba(0,0,0,.1); }
@@ -1294,6 +1321,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" value="passport" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Passport numbers</label>
       </div>
     </div>
+    <div style="margin-top:10px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="reckless-toggle" onchange="saveSettings()" style="width:auto;accent-color:#EF4444">
+        <span>Reckless mode <span style="font-size:12px;color:var(--gray)">(skip OCR privacy check, send directly to AI)</span></span>
+      </label>
+      <div class="field-hint">Skips the local OCR preview and confirmation step. Redaction still runs before sending to the API if enabled above.</div>
+    </div>
   </div>
 
   <div class="card">
@@ -1448,6 +1482,7 @@ let pendingRisk = {level: null, risks: []};
       const pats = s.redact_patterns.split(',');
       document.querySelectorAll('#redact-patterns input[type="checkbox"]').forEach(cb => { cb.checked = pats.includes(cb.value); });
     }
+    if (s.reckless_mode) { $('#reckless-toggle').checked = true; }
   } catch(e) {}
   // Fallback handled by /api/settings defaults
   try {
@@ -1479,6 +1514,7 @@ function saveSettings() {
     daily_budget: $('#daily-budget').value.trim() || '0',
     redact_enabled: $('#redact-toggle').checked,
     redact_patterns: [...document.querySelectorAll('#redact-patterns input[type="checkbox"]:checked')].map(cb => cb.value).join(','),
+    reckless_mode: $('#reckless-toggle').checked,
   };
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings) }).catch(() => {});
 }
@@ -1556,7 +1592,7 @@ function setBusy(busy, statusText) {
 function updateScanProgress(job) {
   const textEl = $('#scan-progress-text');
   const pagesEl = $('#scan-progress-pages');
-  const labels = {scanning: 'Scanning pages...', analyzing: 'Analyzing with AI...', saving: 'Saving documents...'};
+  const labels = {scanning: 'Scanning pages...', analyzing: 'Analyzing with AI...', saving: 'Saving documents...', checking_privacy: 'Checking for sensitive data...'};
   textEl.textContent = labels[job.status] || 'Working...';
   if (job.status === 'scanning' && job.pages_scanned > 0) {
     textEl.textContent = 'Scanning page ' + (job.pages_scanned + 1) + '...';
@@ -1571,14 +1607,18 @@ function updateScanProgress(job) {
     const n = job.pages_scanned || 0;
     if (n > 0) textEl.textContent = 'Analyzing ' + n + ' page' + (n > 1 ? 's' : '') + ' with AI...';
   }
-  // Show redaction alert if sensitive data was found and redacted
+  // Show redaction alert if sensitive data was found and redacted (inline during analysis)
   const alertEl = $('#redact-alert');
-  if (job.redaction && !job.redaction.skipped && job.redaction.count > 0) {
-    const types = job.redaction.types.join(', ');
-    alertEl.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
-      '<span>Sensitive data detected (' + types + ') \u2014 <strong>' + job.redaction.count + ' region(s) redacted</strong> before sending to AI</span>';
+  if (job.status !== 'checking_privacy' && job.redaction && job.redaction.status === 'redacted' && job.redaction.count > 0) {
+    const types = (job.redaction.types || []).join(', ');
+    alertEl.className = 'redact-alert redact-redacted';
+    alertEl.style.flexDirection = 'row';
+    alertEl.style.padding = '10px 14px';
+    alertEl.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' +
+      '<span>' + job.redaction.count + ' region(s) redacted (' + types + ') before sending to AI</span>';
     alertEl.style.display = '';
-  } else if (!job.redaction || !job.redaction.skipped) {
+  } else if (job.status !== 'confirm_send') {
     alertEl.style.display = 'none';
   }
 }
@@ -1587,31 +1627,71 @@ let _redactWarningShown = false;
 function showRedactWarning(job) {
   if (_redactWarningShown) return;
   _redactWarningShown = true;
-  const reason = (job.redaction && job.redaction.reason) || 'Unknown reason';
   const alertEl = $('#redact-alert');
-  alertEl.className = 'redact-alert redact-warning';
-  alertEl.innerHTML =
-    '<div style="flex:1">' +
-      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
-        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
-        '<strong style="font-size:15px">Redaction could not run</strong>' +
-      '</div>' +
-      '<div style="margin-bottom:10px">' + reason.replace(/</g, '&lt;') + '</div>' +
-      '<div style="font-size:12px;opacity:.8;margin-bottom:12px">Your scanned documents may contain sensitive information (SSN, IBAN, credit cards, etc.) that will be sent unredacted to the Claude API.</div>' +
-      '<div style="display:flex;gap:8px">' +
-        '<button class="btn" style="background:#EF4444;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel \u2014 Don\'t Send</button>' +
-        '<button class="btn" style="background:rgba(255,255,255,.1);color:#F1F5F9;border:1px solid rgba(255,255,255,.2);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Anyway</button>' +
-      '</div>' +
-    '</div>';
+  const r = job.redaction || {};
+
+  if (r.status === 'clean') {
+    // No sensitive data found — green panel
+    alertEl.className = 'redact-alert redact-clean';
+    alertEl.innerHTML =
+      '<div style="flex:1">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
+          '<strong style="font-size:15px">No sensitive data detected</strong>' +
+        '</div>' +
+        '<div style="font-size:13px;opacity:.85;margin-bottom:12px">Local OCR scanned all pages and found no sensitive patterns (SSN, IBAN, credit cards, etc.).</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="btn" style="background:#22C55E;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send to AI</button>' +
+          '<button class="btn" style="background:rgba(0,0,0,.06);color:#374151;border:1px solid rgba(0,0,0,.12);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel</button>' +
+        '</div>' +
+      '</div>';
+  } else if (r.status === 'redacted') {
+    // Sensitive data found and redacted — yellow panel
+    const types = (r.types || []).join(', ');
+    alertEl.className = 'redact-alert redact-redacted';
+    alertEl.innerHTML =
+      '<div style="flex:1">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' +
+          '<strong style="font-size:15px">Sensitive data redacted</strong>' +
+        '</div>' +
+        '<div style="font-size:13px;margin-bottom:4px"><strong>' + r.count + ' region(s)</strong> blacked out before sending to AI</div>' +
+        '<div style="font-size:12px;opacity:.8;margin-bottom:12px">Detected: ' + types + '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="btn" style="background:#F59E0B;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Redacted to AI</button>' +
+          '<button class="btn" style="background:rgba(0,0,0,.06);color:#374151;border:1px solid rgba(0,0,0,.12);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel</button>' +
+        '</div>' +
+      '</div>';
+  } else {
+    // Skipped — red warning panel
+    const reason = (r.reason || 'Unknown reason').replace(/</g, '&lt;');
+    alertEl.className = 'redact-alert redact-warning';
+    alertEl.innerHTML =
+      '<div style="flex:1">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+          '<strong style="font-size:15px">Redaction could not run</strong>' +
+        '</div>' +
+        '<div style="margin-bottom:10px">' + reason + '</div>' +
+        '<div style="font-size:12px;opacity:.8;margin-bottom:12px">Your documents may contain sensitive info (SSN, IBAN, credit cards, etc.) that will be sent <strong>unredacted</strong> to the Claude API.</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="btn" style="background:#EF4444;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel \u2014 Don\'t Send</button>' +
+          '<button class="btn" style="background:rgba(0,0,0,.06);color:#374151;border:1px solid rgba(0,0,0,.12);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Anyway</button>' +
+        '</div>' +
+      '</div>';
+  }
+
   alertEl.style.display = '';
-  // Update progress text
   $('#scan-progress-text').textContent = 'Waiting for confirmation...';
 }
 
 function hideRedactWarning() {
   _redactWarningShown = false;
-  $('#redact-alert').style.display = 'none';
-  $('#redact-alert').className = 'redact-alert';
+  const el = $('#redact-alert');
+  el.style.display = 'none';
+  el.className = 'redact-alert';
+  el.style.flexDirection = '';
+  el.style.padding = '';
 }
 
 async function confirmSend() {
@@ -1631,7 +1711,7 @@ function pollJob() {
       try {
         const res = await fetch('/api/job');
         const job = await res.json();
-        if (job.status === 'scanning' || job.status === 'analyzing' || job.status === 'saving') {
+        if (job.status === 'scanning' || job.status === 'analyzing' || job.status === 'saving' || job.status === 'checking_privacy') {
           updateScanProgress(job);
           refreshLog();
           return; // keep polling
@@ -2150,6 +2230,7 @@ let batchData = [];   // Array of doc objects from API
 let batchTags = [];   // Array of Sets, per document
 let batchPages = [];  // Array of arrays of 1-indexed page numbers
 let allPreviews = []; // Base64 thumbs for every scanned page
+let pageRedactions = {}; // {pageNum: {count, types}} from OCR privacy check
 
 async function doBatchScan() {
   setBusy(true, 'scanning');
@@ -2209,6 +2290,7 @@ function showBatchResults(docs) {
 function showBatchModal(result) {
   const docs = result.documents;
   allPreviews = result.all_previews || [];
+  pageRedactions = result.page_redactions || {};
   batchData = docs;
   batchTags = docs.map(d => new Set(d.tags || []));
   batchPages = docs.map(d => [...(d.pages || [])]);
@@ -2225,8 +2307,8 @@ function syncBatchEdits() {
   });
 }
 
-function renderBatchDocs() {
-  syncBatchEdits();
+function renderBatchDocs(skipSync) {
+  if (!skipSync) syncBatchEdits();
 
   const docsWithPages = batchPages.filter(p => p.length > 0).length;
   $('#batch-count').textContent = docsWithPages;
@@ -2265,8 +2347,10 @@ function renderBatchDocs() {
       const pc = (doc.page_confidence && doc.page_confidence[pNum]) || doc.confidence || 100;
       const pcClass = pc >= 85 ? 'high' : pc >= 65 ? 'med' : 'low';
       const pcBadge = pc < 100 ? '<span class="page-confidence ' + pcClass + '">' + pc + '%</span>' : '';
+      const pr = pageRedactions[pNum];
+      const ocrBadge = pr ? '<span class="ocr-badge" title="' + pr.count + ' region(s) redacted: ' + (pr.types||[]).join(', ') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>OCR</span>' : '';
       pagesHtml += '<div class="batch-page" draggable="true" data-page="' + pNum + '" data-doc="' + i + '">' +
-        pcBadge +
+        pcBadge + ocrBadge +
         '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '" onclick="openLightbox(' + pNum + ',' + i + ')" title="Click to preview" style="cursor:zoom-in" draggable="false">' +
         '<span>Page ' + pNum + '</span>' +
         '<select class="batch-page-move" data-page="' + pNum + '" data-doc="' + i + '" aria-label="Move page ' + pNum + '">' + moveOpts + '</select>' +
@@ -2289,11 +2373,17 @@ function renderBatchDocs() {
 
     const conf = doc.confidence || 100;
     const confClass = conf >= 85 ? 'high' : conf >= 65 ? 'med' : 'low';
+    // Count how many pages in this document were redacted by OCR
+    const docRedactedPages = pages.filter(p => pageRedactions[p]).length;
+    const ocrDocBadge = docRedactedPages > 0
+      ? '<span class="ocr-doc-badge" title="' + docRedactedPages + ' page(s) had sensitive data redacted by local OCR"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>OCR protected</span>'
+      : '';
     card.innerHTML =
       '<div class="batch-doc-head">' +
         '<div class="batch-doc-title">' +
           '<span class="batch-doc-label">' + esc(docShortName(doc, i)) + (doc.summary ? ' \u2014 ' + esc(doc.summary) : '') + '</span>' +
           '<span class="confidence-badge confidence-' + confClass + '" title="AI confidence in document grouping">' + conf + '%</span>' +
+          ocrDocBadge +
           (pages.length === 0 ? '<button class="btn-remove-doc" onclick="removeBatchDoc(' + i + ')">Remove</button>' : '') +
         '</div>' +
       '</div>' +
@@ -2363,10 +2453,11 @@ function addBatchDocument() {
 
 function removeBatchDoc(idx) {
   if (batchPages[idx] && batchPages[idx].length > 0) return; // Can't remove doc with pages
+  syncBatchEdits(); // sync while DOM indices still match data
   batchData.splice(idx, 1);
   batchTags.splice(idx, 1);
   batchPages.splice(idx, 1);
-  renderBatchDocs();
+  renderBatchDocs(true); // skip re-sync since indices shifted
 }
 
 function addBatchTag(docIdx) {
