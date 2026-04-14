@@ -29,7 +29,7 @@ app = Flask(__name__)
 # ── Persistent settings ─────────────────────────────────────────────
 
 SETTINGS_DEFAULTS = {
-    "output_dir": "~/Documents/Scans",
+    "output_dir": str(Path("~/Documents/Scans").expanduser()),
     "scanner_ip": "",
     "resolution": "300",
     "color_mode": "RGB24",
@@ -189,7 +189,7 @@ def _open_folder_dialog(start_dir: str = "") -> str | None:
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0:
-            return result.stdout.strip().rstrip("/")
+            return result.stdout.strip().rstrip("/\\")
         return None
 
     if system == "Linux":
@@ -1010,7 +1010,7 @@ let pendingRisk = {level: null, risks: []};
     }
     if (s.mode) setMode(s.mode);
   } catch(e) {}
-  if (!$('#output-dir').value) $('#output-dir').value = '~/Documents/Scans';
+  // Fallback handled by /api/settings defaults
   try {
     const res = await fetch('/api/config');
     const data = await res.json();
@@ -1158,7 +1158,7 @@ async function scanOnly() {
     const job = await pollJob();
     if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
     else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
-    else if (job.status === 'done' && job.result) { showResult({folder: 'unsorted', tags: [], filename: (job.result.output_path || '').split('/').pop(), summary: 'Saved without classification', path: job.result.output_path}); }
+    else if (job.status === 'done' && job.result) { showResult({folder: 'unsorted', tags: [], filename: (job.result.output_path || '').split(/[/\\]/).pop(), summary: 'Saved without classification', path: job.result.output_path}); }
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
 }
@@ -1358,7 +1358,7 @@ function showBatchResults(docs) {
   const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
   docs.forEach(doc => {
     const li = document.createElement('li');
-    const name = doc.filename || (doc.output_path || '').split('/').pop() || 'document';
+    const name = doc.filename || (doc.output_path || '').split(/[/\\]/).pop() || 'document';
     const detail = [doc.folder || doc.category, doc.summary].filter(Boolean).join(' \u2014 ');
     li.innerHTML = '<span class="br-name">' + esc(name) + '</span>' + (detail ? '<br><span class="br-detail">' + esc(detail) + '</span>' : '');
     list.appendChild(li);
