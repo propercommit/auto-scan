@@ -999,20 +999,48 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .radio-group label { display: flex; align-items: center; gap: 6px; font-weight: 400; cursor: pointer; }
   .radio-group input[type="radio"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .btn-row { display: flex; gap: 10px; }
-  .scan-progress { margin-top: 14px; padding: 14px 16px; background: #0F1117; border-radius: 10px; color: #F1F5F9; }
-  .scan-progress-inner { display: flex; align-items: center; gap: 10px; }
-  .scan-progress-spinner { width: 16px; height: 16px; border: 2px solid rgba(129,140,248,.3); border-top-color: #818CF8; border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
-  .scan-progress-text { font-size: 14px; font-weight: 600; }
-  .scan-progress-pages { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .scan-progress-page { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; background: #1A1D2B; border-radius: 6px; font-size: 12px; font-family: var(--mono); color: #94A3B8; animation: fadeSlideIn .3s ease; }
-  .scan-progress-page svg { color: #34D399; }
-  .redact-alert { margin-top: 10px; padding: 16px 18px; border-radius: 8px; font-size: 13px; display: flex; align-items: flex-start; gap: 8px; flex-direction: column; }
+  .pipeline-wrap { margin-top: 14px; padding: 16px; background: #0F1117; border-radius: 10px; color: #F1F5F9; }
+  .pipeline { display: flex; flex-direction: column; gap: 0; position: relative; }
+  .pipeline-step { display: flex; align-items: flex-start; gap: 12px; padding: 8px 0; position: relative; }
+  .pipeline-step:not(:last-child)::after { content: ''; position: absolute; left: 15px; top: 36px; bottom: -8px; width: 2px; background: #2D3348; transition: background .3s; }
+  .pipeline-step[data-status="done"]:not(:last-child)::after { background: #34D399; }
+  .pipe-dot { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: #2D3348; transition: background .3s, box-shadow .3s; position: relative; z-index: 1; }
+  .pipe-num { font-size: 13px; font-weight: 700; color: #64748B; transition: color .3s; }
+  .pipeline-step[data-status="active"] .pipe-dot { background: #3B82F6; box-shadow: 0 0 0 4px rgba(59,130,246,.25); }
+  .pipeline-step[data-status="active"] .pipe-num { color: #fff; }
+  .pipeline-step[data-status="active"] .pipe-dot::before { content: ''; position: absolute; inset: -4px; border: 2px solid transparent; border-top-color: rgba(59,130,246,.6); border-radius: 50%; animation: spin .8s linear infinite; }
+  .pipeline-step[data-status="done"] .pipe-dot { background: #22C55E; }
+  .pipeline-step[data-status="done"] .pipe-num { color: #fff; font-size: 0; }
+  .pipeline-step[data-status="done"] .pipe-num::after { content: '\2713'; font-size: 15px; }
+  .pipeline-step[data-status="warning"] .pipe-dot { background: #F59E0B; }
+  .pipeline-step[data-status="warning"] .pipe-num { color: #fff; font-size: 0; }
+  .pipeline-step[data-status="warning"] .pipe-num::after { content: '!'; font-size: 15px; font-weight: 800; }
+  .pipeline-step[data-status="warning"]:not(:last-child)::after { background: #F59E0B; }
+  .pipeline-step[data-status="error"] .pipe-dot { background: #EF4444; }
+  .pipeline-step[data-status="error"] .pipe-num { color: #fff; font-size: 0; }
+  .pipeline-step[data-status="error"] .pipe-num::after { content: '\2717'; font-size: 15px; }
+  .pipeline-step[data-status="skipped"] .pipe-dot { background: #475569; }
+  .pipeline-step[data-status="skipped"] .pipe-num { color: #94A3B8; font-size: 0; }
+  .pipeline-step[data-status="skipped"] .pipe-num::after { content: '\2014'; font-size: 14px; }
+  .pipeline-step[data-status="skipped"]:not(:last-child)::after { background: #475569; }
+  .pipe-body { flex: 1; min-width: 0; padding-top: 4px; }
+  .pipe-label { font-size: 14px; font-weight: 700; color: #94A3B8; transition: color .3s; }
+  .pipeline-step[data-status="active"] .pipe-label { color: #F1F5F9; }
+  .pipeline-step[data-status="done"] .pipe-label { color: #86EFAC; }
+  .pipeline-step[data-status="warning"] .pipe-label { color: #FCD34D; }
+  .pipeline-step[data-status="error"] .pipe-label { color: #FCA5A5; }
+  .pipe-detail { font-size: 12px; color: #64748B; margin-top: 2px; line-height: 1.4; }
+  .pipeline-step[data-status="active"] .pipe-detail { color: #94A3B8; }
+  .pipeline-step[data-status="done"] .pipe-detail { color: #6EE7B7; }
+  .pipeline-step[data-status="warning"] .pipe-detail { color: #FDE68A; }
+  .pipeline-step[data-status="error"] .pipe-detail { color: #FCA5A5; }
+  .redact-alert { margin-top: 12px; padding: 12px 14px; border-radius: 8px; font-size: 13px; }
   .redact-alert svg { flex-shrink: 0; }
-  .redact-alert.redact-clean { background: #f0fdf4; border: 2px solid #86efac; color: #166534; }
+  .redact-alert.redact-clean { background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.3); color: #86EFAC; }
   .redact-alert.redact-clean svg { color: #22C55E; }
-  .redact-alert.redact-redacted { background: #fffbeb; border: 2px solid #fcd34d; color: #713f12; }
+  .redact-alert.redact-redacted { background: rgba(245,158,11,.1); border: 1px solid rgba(245,158,11,.3); color: #FDE68A; }
   .redact-alert.redact-redacted svg { color: #F59E0B; }
-  .redact-alert.redact-warning { background: #fef2f2; border: 2px solid #fca5a5; color: #991b1b; }
+  .redact-alert.redact-warning { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); color: #FCA5A5; }
   .redact-alert.redact-warning svg { color: #EF4444; }
   .ocr-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 6px; background: #dbeafe; color: #1e40af; position: absolute; top: 2px; left: 2px; z-index: 1; white-space: nowrap; }
   .ocr-badge svg { width: 10px; height: 10px; }
@@ -1419,12 +1447,37 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <button class="btn btn-batch" id="btn-batch" onclick="doBatchScan()" disabled><span class="spinner" aria-hidden="true"></span>Batch Scan</button>
       <button class="btn btn-secondary" id="btn-scan" onclick="scanOnly()" disabled><span class="spinner" aria-hidden="true"></span><span class="sr-only busy-text" hidden>Scanning...</span>Scan Only</button>
     </div>
-    <div class="scan-progress" id="scan-progress" style="display:none" aria-live="polite">
-      <div class="scan-progress-inner">
-        <span class="scan-progress-spinner"></span>
-        <span class="scan-progress-text" id="scan-progress-text">Scanning...</span>
+    <div class="pipeline-wrap" id="scan-progress" style="display:none" aria-live="polite">
+      <div class="pipeline" id="pipeline">
+        <div class="pipeline-step" id="pipe-scan" data-status="pending">
+          <div class="pipe-dot"><span class="pipe-num">1</span></div>
+          <div class="pipe-body">
+            <div class="pipe-label">Scan</div>
+            <div class="pipe-detail" id="pipe-scan-detail"></div>
+          </div>
+        </div>
+        <div class="pipeline-step" id="pipe-ocr" data-status="pending">
+          <div class="pipe-dot"><span class="pipe-num">2</span></div>
+          <div class="pipe-body">
+            <div class="pipe-label">Privacy Check</div>
+            <div class="pipe-detail" id="pipe-ocr-detail"></div>
+          </div>
+        </div>
+        <div class="pipeline-step" id="pipe-ai" data-status="pending">
+          <div class="pipe-dot"><span class="pipe-num">3</span></div>
+          <div class="pipe-body">
+            <div class="pipe-label">AI Analysis</div>
+            <div class="pipe-detail" id="pipe-ai-detail"></div>
+          </div>
+        </div>
+        <div class="pipeline-step" id="pipe-save" data-status="pending">
+          <div class="pipe-dot"><span class="pipe-num">4</span></div>
+          <div class="pipe-body">
+            <div class="pipe-label">Save</div>
+            <div class="pipe-detail" id="pipe-save-detail"></div>
+          </div>
+        </div>
       </div>
-      <div class="scan-progress-pages" id="scan-progress-pages"></div>
       <div class="redact-alert" id="redact-alert" style="display:none"></div>
     </div>
   </div>
@@ -1696,55 +1749,68 @@ async function browseFolder() {
 function getScanParams() {
   return { source: document.querySelector('input[name="source"]:checked').value, resolution: $('#resolution').value, color: $('#color').value, output_dir: $('#output-dir').value, scanner_ip: $('#scanner-ip').value.trim() };
 }
-function setBusy(busy, statusText) {
+function setBusy(busy) {
   ['#btn-classify','#btn-scan','#btn-batch'].forEach(s => { const el = $(s); if (el) { el.disabled = busy; el.setAttribute('aria-busy', busy); el.classList.toggle('busy', busy); }});
   document.querySelectorAll('.busy-text').forEach(el => el.hidden = !busy);
   const prog = $('#scan-progress');
   if (busy) {
-    const labels = {scanning: 'Scanning pages...', analyzing: 'Analyzing with AI...', saving: 'Saving documents...'};
-    const txt = labels[statusText] || statusText || 'Working...';
-    document.querySelectorAll('.busy-text').forEach(el => el.textContent = txt);
-    $('#scan-progress-text').textContent = txt;
     prog.style.display = '';
-    if (statusText !== 'scanning') $('#scan-progress-pages').innerHTML = '';
-    $('#redact-alert').style.display = 'none';
+    resetPipeline();
+    setPipeStep('pipe-scan', 'active', 'Starting...');
   } else {
     prog.style.display = 'none';
-    $('#scan-progress-pages').innerHTML = '';
     $('#redact-alert').style.display = 'none';
   }
 }
+
+function setPipeStep(id, status, detail) {
+  const el = $('#' + id);
+  if (!el) return;
+  el.dataset.status = status;
+  const detailEl = el.querySelector('.pipe-detail');
+  if (detailEl && detail !== undefined) detailEl.textContent = detail;
+}
+
+function setPipeDetail(id, html) {
+  const el = document.querySelector('#' + id + ' .pipe-detail');
+  if (el) el.innerHTML = html;
+}
+
+function resetPipeline() {
+  ['pipe-scan','pipe-ocr','pipe-ai','pipe-save'].forEach(id => setPipeStep(id, 'pending', ''));
+  $('#redact-alert').style.display = 'none';
+  _redactWarningShown = false;
+}
+
 function updateScanProgress(job) {
-  const textEl = $('#scan-progress-text');
-  const pagesEl = $('#scan-progress-pages');
-  const labels = {scanning: 'Scanning pages...', analyzing: 'Analyzing with AI...', saving: 'Saving documents...', checking_privacy: 'Checking for sensitive data...'};
-  textEl.textContent = labels[job.status] || 'Working...';
-  if (job.status === 'scanning' && job.pages_scanned > 0) {
-    textEl.textContent = 'Scanning page ' + (job.pages_scanned + 1) + '...';
-    const current = pagesEl.children.length;
-    for (let i = current + 1; i <= job.pages_scanned; i++) {
-      const tag = document.createElement('span');
-      tag.className = 'scan-progress-page';
-      tag.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Page ' + i;
-      pagesEl.appendChild(tag);
-    }
-  } else if (job.status === 'analyzing') {
+  const s = job.status;
+  if (s === 'scanning') {
+    setPipeStep('pipe-scan', 'active');
     const n = job.pages_scanned || 0;
-    if (n > 0) textEl.textContent = 'Analyzing ' + n + ' page' + (n > 1 ? 's' : '') + ' with AI...';
-  }
-  // Show redaction alert if sensitive data was found and redacted (inline during analysis)
-  const alertEl = $('#redact-alert');
-  if (job.status !== 'checking_privacy' && job.redaction && job.redaction.status === 'redacted' && job.redaction.count > 0) {
-    const types = (job.redaction.types || []).join(', ');
-    alertEl.className = 'redact-alert redact-redacted';
-    alertEl.style.flexDirection = 'row';
-    alertEl.style.padding = '10px 14px';
-    alertEl.innerHTML =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' +
-      '<span>' + job.redaction.count + ' region(s) redacted (' + types + ') before sending to AI</span>';
-    alertEl.style.display = '';
-  } else if (job.status !== 'confirm_send') {
-    alertEl.style.display = 'none';
+    if (n > 0) setPipeStep('pipe-scan', 'active', 'Scanning page ' + (n + 1) + '... (' + n + ' done)');
+    else setPipeStep('pipe-scan', 'active', 'Scanning pages...');
+  } else if (s === 'checking_privacy') {
+    setPipeStep('pipe-scan', 'done', (job.pages_scanned || '?') + ' page(s) scanned');
+    setPipeStep('pipe-ocr', 'active', 'Running local OCR...');
+  } else if (s === 'analyzing') {
+    setPipeStep('pipe-scan', 'done', (job.pages_scanned || '?') + ' page(s) scanned');
+    // Mark OCR step based on redaction info
+    if (job.redaction) {
+      const r = job.redaction;
+      if (r.status === 'clean') setPipeStep('pipe-ocr', 'done', 'No sensitive data found');
+      else if (r.status === 'redacted') {
+        setPipeStep('pipe-ocr', 'warning', r.count + ' region(s) redacted (' + (r.types||[]).join(', ') + ')');
+      } else setPipeStep('pipe-ocr', 'error', 'Skipped: ' + (r.reason || 'unavailable'));
+    } else {
+      setPipeStep('pipe-ocr', 'skipped', 'Disabled or reckless mode');
+    }
+    setPipeStep('pipe-ai', 'active');
+    const n = job.pages_scanned || 0;
+    setPipeStep('pipe-ai', 'active', 'Analyzing ' + n + ' page' + (n > 1 ? 's' : '') + ' with AI...');
+  } else if (s === 'saving') {
+    setPipeStep('pipe-scan', 'done');
+    setPipeStep('pipe-ai', 'done', 'Classification complete');
+    setPipeStep('pipe-save', 'active', 'Saving documents...');
   }
 }
 
@@ -1752,62 +1818,60 @@ let _redactWarningShown = false;
 function showRedactWarning(job) {
   if (_redactWarningShown) return;
   _redactWarningShown = true;
-  const alertEl = $('#redact-alert');
-  const r = job.redaction || {};
 
+  // Update pipeline: scan done, OCR shows results
+  setPipeStep('pipe-scan', 'done', (job.pages_scanned || '?') + ' page(s) scanned');
+  const r = job.redaction || {};
   if (r.status === 'clean') {
-    // No sensitive data found — green panel
+    setPipeStep('pipe-ocr', 'done', 'No sensitive data found');
+  } else if (r.status === 'redacted') {
+    setPipeStep('pipe-ocr', 'warning', r.count + ' region(s) redacted');
+  } else {
+    setPipeStep('pipe-ocr', 'error', 'Could not run');
+  }
+
+  // Show confirmation panel below pipeline
+  const alertEl = $('#redact-alert');
+  if (r.status === 'clean') {
     alertEl.className = 'redact-alert redact-clean';
     alertEl.innerHTML =
-      '<div style="flex:1">' +
-        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
-          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
-          '<strong style="font-size:15px">No sensitive data detected</strong>' +
-        '</div>' +
-        '<div style="font-size:13px;opacity:.85;margin-bottom:12px">Local OCR scanned all pages and found no sensitive patterns (SSN, IBAN, credit cards, etc.).</div>' +
-        '<div style="display:flex;gap:8px">' +
-          '<button class="btn" style="background:#22C55E;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send to AI</button>' +
-          '<button class="btn" style="background:rgba(0,0,0,.06);color:#374151;border:1px solid rgba(0,0,0,.12);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel</button>' +
-        '</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
+        '<strong>All clear</strong> \u2014 no sensitive patterns detected' +
+      '</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn" style="background:#22C55E;color:#fff;border:none;padding:8px 18px;font-size:13px;font-weight:700;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send to AI</button>' +
+        '<button class="btn" style="background:rgba(255,255,255,.08);color:#94A3B8;border:1px solid rgba(255,255,255,.12);padding:8px 18px;font-size:13px;font-weight:600;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel</button>' +
       '</div>';
   } else if (r.status === 'redacted') {
-    // Sensitive data found and redacted — yellow panel
     const types = (r.types || []).join(', ');
     alertEl.className = 'redact-alert redact-redacted';
     alertEl.innerHTML =
-      '<div style="flex:1">' +
-        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
-          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' +
-          '<strong style="font-size:15px">Sensitive data redacted</strong>' +
-        '</div>' +
-        '<div style="font-size:13px;margin-bottom:4px"><strong>' + r.count + ' region(s)</strong> blacked out before sending to AI</div>' +
-        '<div style="font-size:12px;opacity:.8;margin-bottom:12px">Detected: ' + types + '</div>' +
-        '<div style="display:flex;gap:8px">' +
-          '<button class="btn" style="background:#F59E0B;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Redacted to AI</button>' +
-          '<button class="btn" style="background:rgba(0,0,0,.06);color:#374151;border:1px solid rgba(0,0,0,.12);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel</button>' +
-        '</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' +
+        '<strong>' + r.count + ' region(s) redacted</strong>' +
+      '</div>' +
+      '<div style="font-size:12px;margin-bottom:8px;opacity:.85">Detected: ' + types + ' \u2014 blacked out before sending</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn" style="background:#F59E0B;color:#fff;border:none;padding:8px 18px;font-size:13px;font-weight:700;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Redacted to AI</button>' +
+        '<button class="btn" style="background:rgba(255,255,255,.08);color:#94A3B8;border:1px solid rgba(255,255,255,.12);padding:8px 18px;font-size:13px;font-weight:600;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel</button>' +
       '</div>';
   } else {
-    // Skipped — red warning panel
     const reason = (r.reason || 'Unknown reason').replace(/</g, '&lt;');
     alertEl.className = 'redact-alert redact-warning';
     alertEl.innerHTML =
-      '<div style="flex:1">' +
-        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
-          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
-          '<strong style="font-size:15px">Redaction could not run</strong>' +
-        '</div>' +
-        '<div style="margin-bottom:10px">' + reason + '</div>' +
-        '<div style="font-size:12px;opacity:.8;margin-bottom:12px">Your documents may contain sensitive info (SSN, IBAN, credit cards, etc.) that will be sent <strong>unredacted</strong> to the Claude API.</div>' +
-        '<div style="display:flex;gap:8px">' +
-          '<button class="btn" style="background:#EF4444;color:#fff;border:none;padding:10px 20px;font-size:14px;font-weight:700;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel \u2014 Don\'t Send</button>' +
-          '<button class="btn" style="background:rgba(0,0,0,.06);color:#374151;border:1px solid rgba(0,0,0,.12);padding:10px 20px;font-size:14px;font-weight:600;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Anyway</button>' +
-        '</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+        '<strong>Redaction could not run</strong>' +
+      '</div>' +
+      '<div style="font-size:12px;margin-bottom:4px">' + reason + '</div>' +
+      '<div style="font-size:12px;margin-bottom:8px;opacity:.8">Documents may be sent <strong>unredacted</strong> to the AI.</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn" style="background:#EF4444;color:#fff;border:none;padding:8px 18px;font-size:13px;font-weight:700;border-radius:8px;cursor:pointer" onclick="cancelSend()">Cancel</button>' +
+        '<button class="btn" style="background:rgba(255,255,255,.08);color:#94A3B8;border:1px solid rgba(255,255,255,.12);padding:8px 18px;font-size:13px;font-weight:600;border-radius:8px;cursor:pointer" onclick="confirmSend()">Send Anyway</button>' +
       '</div>';
   }
-
   alertEl.style.display = '';
-  $('#scan-progress-text').textContent = 'Waiting for confirmation...';
 }
 
 function hideRedactWarning() {
@@ -1815,13 +1879,12 @@ function hideRedactWarning() {
   const el = $('#redact-alert');
   el.style.display = 'none';
   el.className = 'redact-alert';
-  el.style.flexDirection = '';
-  el.style.padding = '';
 }
 
 async function confirmSend() {
   hideRedactWarning();
-  $('#scan-progress-text').textContent = 'Sending to AI...';
+  setPipeStep('pipe-ocr', 'done');
+  setPipeStep('pipe-ai', 'active', 'Sending to AI...');
   try { await fetch('/api/job/confirm', { method: 'POST' }); } catch(e) {}
 }
 
