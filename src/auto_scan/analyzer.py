@@ -15,10 +15,17 @@ from PIL import Image
 from auto_scan import AnalysisError
 from auto_scan.config import Config
 
+ALL_CATEGORIES = [
+    "invoice", "receipt", "contract", "letter", "medical", "tax",
+    "insurance", "bank", "government", "personal", "automobile",
+    "housing", "education", "employment", "travel", "utilities",
+    "manual", "other",
+]
+
 ANALYSIS_PROMPT = """\
 You are a document classification and naming assistant. Analyze this scanned document and return a JSON response with:
 
-1. "category": one of: invoice, receipt, contract, letter, medical, tax, insurance, bank, government, personal, manual, other
+1. "category": one of: {categories}
 2. "filename": a descriptive filename using the pattern: YYYY-MM-DD_category_description.pdf
    - Use the document date if visible, otherwise use today's date ({today})
    - Keep the description short (2-5 words, lowercase, underscores)
@@ -27,6 +34,7 @@ You are a document classification and naming assistant. Analyze this scanned doc
 4. "date": the document date in YYYY-MM-DD format, or null if not found
 5. "key_fields": object with extracted key-value pairs relevant to the category
    (e.g., for invoice: {{"vendor": "...", "amount": "...", "invoice_number": "..."}})
+6. "suggested_categories": a list of 3-5 categories from the list above that best match this document, ranked by relevance (most relevant first). The first one should match "category".
 
 Return ONLY valid JSON, no markdown formatting or code blocks."""
 
@@ -38,6 +46,7 @@ class DocumentInfo:
     summary: str
     date: str | None
     key_fields: dict = field(default_factory=dict)
+    suggested_categories: list[str] = field(default_factory=list)
 
 
 def _resize_for_api(image_data: bytes, max_dim: int = 1568) -> bytes:
@@ -82,7 +91,10 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     content.append(
         {
             "type": "text",
-            "text": ANALYSIS_PROMPT.format(today=date.today().isoformat()),
+            "text": ANALYSIS_PROMPT.format(
+                today=date.today().isoformat(),
+                categories=", ".join(ALL_CATEGORIES),
+            ),
         }
     )
 
@@ -117,6 +129,7 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
         summary=data.get("summary", ""),
         date=data.get("date"),
         key_fields=data.get("key_fields", {}),
+        suggested_categories=data.get("suggested_categories", []),
     )
 
     print(f"  Category: {doc_info.category}", file=sys.stderr)

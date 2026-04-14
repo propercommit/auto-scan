@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 import threading
 import webbrowser
@@ -9,9 +11,10 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string, request
+from PIL import Image
 
 from auto_scan import AutoScanError
-from auto_scan.analyzer import DocumentInfo, analyze_document
+from auto_scan.analyzer import ALL_CATEGORIES, DocumentInfo, analyze_document
 from auto_scan.config import Config, load_config
 from auto_scan.organizer import save_document, save_unclassified
 from auto_scan.scanner.discovery import ScannerInfo, discover_scanner, scanner_info_from_ip
@@ -23,8 +26,9 @@ app = Flask(__name__)
 
 state = {
     "scanner_info": None,
-    "config": None,
     "logs": [],
+    "pending_images": None,
+    "pending_doc_info": None,
 }
 
 
@@ -37,6 +41,17 @@ def _log(msg: str) -> None:
 
 def _get_config(**overrides) -> Config:
     return load_config(**overrides)
+
+
+def _make_thumbnail(image_data: bytes, max_dim: int = 800) -> bytes:
+    img = Image.open(io.BytesIO(image_data))
+    w, h = img.size
+    if w > max_dim or h > max_dim:
+        scale = max_dim / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=75)
+    return buf.getvalue()
 
 
 # ── Routes ───────────────────────────────────────────────────────────
@@ -56,11 +71,9 @@ def api_config():
 def api_save_key():
     data = request.json or {}
     key = data.get("key", "").strip()
-
     if not key:
         return jsonify({"ok": False, "error": "API key cannot be empty"}), 400
 
-    # Find .env file
     env_path = None
     for candidate in [Path(".env"), Path(__file__).resolve().parents[2] / ".env"]:
         if candidate.exists():
@@ -69,7 +82,6 @@ def api_save_key():
     if env_path is None:
         env_path = Path(".env")
 
-    # Update or create .env
     if env_path.exists():
         content = env_path.read_text()
         lines = content.splitlines()
@@ -94,7 +106,6 @@ def api_save_key():
 def api_connect():
     data = request.json or {}
     ip = data.get("ip", "").strip()
-
     try:
         if ip:
             _log(f"Connecting to {ip}...")
@@ -113,97 +124,148 @@ def api_connect():
         _log(f"  State: {status.state}, ADF: {status.adf_state or 'N/A'}")
 
         return jsonify({
-            "ok": True,
-            "name": info.name,
-            "ip": info.ip,
-            "state": status.state,
-            "adf": status.adf_state,
-            "sources": caps.sources,
-            "resolutions": caps.resolutions,
-            "color_modes": caps.color_modes,
+            "ok": True, "name": info.name, "ip": info.ip,
+            "state": status.state, "adf": status.adf_state,
+            "sources": caps.sources, "resolutions": caps.resolutions,
         })
     except Exception as e:
         _log(f"Error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/scan", methods=["POST"])
-def api_scan():
-    data = request.json or {}
-    classify = data.get("classify", True)
+def _do_scan(data: dict) -> tuple[list[bytes], Config]:
+    """Common scan logic: connect, check status, scan, return images + config."""
     source = data.get("source", "Feeder")
     resolution = int(data.get("resolution", 300))
     color = data.get("color", "RGB24")
+
+    overrides = {"scan_source": source, "resolution": resolution, "color_mode": color}
     output_dir = data.get("output_dir", "")
+    if output_dir:
+        overrides["output_dir"] = output_dir
+    scanner_ip = data.get("scanner_ip", "").strip()
+    if scanner_ip:
+        overrides["scanner_ip"] = scanner_ip
 
+    config = _get_config(**overrides)
+
+    info = state.get("scanner_info")
+    if not info:
+        if config.scanner_ip:
+            info = scanner_info_from_ip(config.scanner_ip)
+        else:
+            info = discover_scanner(timeout=8.0)
+        state["scanner_info"] = info
+
+    with ESCLClient(info.base_url) as client:
+        status = client.get_status()
+        if status.state != "Idle":
+            raise AutoScanError(f"Scanner is {status.state}. Wait and try again.")
+        _log("Scanning...")
+        settings = ScanSettings(
+            source=source, color_mode=color,
+            resolution=resolution, document_format=config.scan_format,
+        )
+        images = client.scan(settings)
+
+    _log(f"Scanned {len(images)} page(s)")
+    return images, config
+
+
+@app.route("/api/scan", methods=["POST"])
+def api_scan():
+    """Automatic mode: scan, classify, save in one shot."""
+    data = request.json or {}
+    classify = data.get("classify", True)
     try:
-        overrides = {
-            "scan_source": source,
-            "resolution": resolution,
-            "color_mode": color,
-        }
-        if output_dir:
-            overrides["output_dir"] = output_dir
-
-        scanner_ip = data.get("scanner_ip", "").strip()
-        if scanner_ip:
-            overrides["scanner_ip"] = scanner_ip
-
-        config = _get_config(**overrides)
-
-        info = state.get("scanner_info")
-        if not info:
-            if config.scanner_ip:
-                info = scanner_info_from_ip(config.scanner_ip)
-            else:
-                info = discover_scanner(timeout=8.0)
-            state["scanner_info"] = info
-
-        with ESCLClient(info.base_url) as client:
-            status = client.get_status()
-            if status.state != "Idle":
-                raise AutoScanError(f"Scanner is {status.state}. Wait and try again.")
-
-            _log("Scanning...")
-            settings = ScanSettings(
-                source=source,
-                color_mode=color,
-                resolution=resolution,
-                document_format=config.scan_format,
-            )
-            images = client.scan(settings)
-
-        _log(f"Scanned {len(images)} page(s)")
-
+        images, config = _do_scan(data)
         result = {"ok": True, "pages": len(images)}
 
         if classify:
             _log("Analyzing with Claude Vision...")
             doc_info = analyze_document(images, config)
             _log(f"Classified as: {doc_info.category}")
-
             output_path = save_document(images, doc_info, config)
             _log(f"Saved: {output_path}")
-
             result.update({
-                "classified": True,
-                "category": doc_info.category,
-                "filename": doc_info.filename,
-                "summary": doc_info.summary,
-                "date": doc_info.date,
-                "key_fields": doc_info.key_fields,
-                "output_path": str(output_path),
+                "classified": True, "category": doc_info.category,
+                "filename": doc_info.filename, "summary": doc_info.summary,
+                "date": doc_info.date, "output_path": str(output_path),
             })
         else:
             output_path = save_unclassified(images, config)
             _log(f"Saved: {output_path}")
-            result.update({
-                "classified": False,
-                "output_path": str(output_path),
-            })
+            result.update({"classified": False, "output_path": str(output_path)})
 
         return jsonify(result)
+    except Exception as e:
+        _log(f"Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
+
+@app.route("/api/scan-assisted", methods=["POST"])
+def api_scan_assisted():
+    """Assisted mode: scan + analyze, return suggestions, don't save yet."""
+    data = request.json or {}
+    try:
+        images, config = _do_scan(data)
+
+        _log("Analyzing with Claude Vision...")
+        doc_info = analyze_document(images, config)
+        _log(f"AI suggests: {doc_info.category}")
+
+        state["pending_images"] = images
+        state["pending_doc_info"] = doc_info
+
+        thumb = _make_thumbnail(images[0])
+        preview_b64 = base64.b64encode(thumb).decode("ascii")
+
+        return jsonify({
+            "ok": True,
+            "pages": len(images),
+            "preview": preview_b64,
+            "category": doc_info.category,
+            "suggested_categories": doc_info.suggested_categories,
+            "all_categories": ALL_CATEGORIES,
+            "filename": doc_info.filename,
+            "summary": doc_info.summary,
+            "date": doc_info.date,
+            "key_fields": doc_info.key_fields,
+        })
+    except Exception as e:
+        _log(f"Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/save-classified", methods=["POST"])
+def api_save_classified():
+    """Save pending scanned images with the user's chosen category."""
+    data = request.json or {}
+    category = data.get("category", "other")
+    filename = data.get("filename", "")
+
+    images = state.get("pending_images")
+    doc_info = state.get("pending_doc_info")
+
+    if not images or not doc_info:
+        return jsonify({"ok": False, "error": "No pending scan to save."}), 400
+
+    try:
+        doc_info.category = category
+        if filename:
+            doc_info.filename = filename
+
+        config = _get_config(
+            **({"output_dir": data["output_dir"]} if data.get("output_dir") else {}),
+        )
+
+        output_path = save_document(images, doc_info, config)
+        _log(f"Saved as {category}: {output_path}")
+
+        state["pending_images"] = None
+        state["pending_doc_info"] = None
+
+        return jsonify({"ok": True, "output_path": str(output_path), "category": category})
     except Exception as e:
         _log(f"Error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -254,15 +316,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .results-grid { display: grid; grid-template-columns: 100px 1fr; gap: 4px 12px; font-size: 14px; }
   .results-grid dt { font-weight: 600; color: #495057; }
   .results-grid dd { color: #212529; word-break: break-word; }
-  .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px; height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px; height: 160px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .spinner { display: none; width: 18px; height: 18px; border: 2px solid #fff4; border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; margin-right: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .busy .spinner { display: inline-block; }
   .output-path { margin-top: 10px; padding: 8px 12px; background: #d1e7dd; border-radius: 6px; font-size: 13px; word-break: break-all; }
-  /* Modal */
-  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 100; align-items: center; justify-content: center; }
+  .mode-toggle { display: flex; background: #e9ecef; border-radius: 8px; padding: 3px; margin-bottom: 12px; }
+  .mode-toggle button { flex: 1; padding: 8px 16px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; background: transparent; color: var(--gray); transition: all .15s; }
+  .mode-toggle button.active { background: #fff; color: #212529; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center; }
   .modal-overlay.active { display: flex; }
-  .modal { background: #fff; border-radius: 14px; padding: 28px; width: 480px; max-width: 90vw; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+  .modal { background: #fff; border-radius: 14px; padding: 28px; max-width: 90vw; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+  .modal-sm { width: 480px; }
   .modal h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; color: #212529; text-transform: none; letter-spacing: 0; }
   .modal p { font-size: 14px; color: var(--gray); margin-bottom: 16px; line-height: 1.6; }
   .modal a { color: var(--primary); }
@@ -271,13 +336,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   .modal-btns .btn { width: auto; }
   .modal-error { color: var(--red); font-size: 13px; min-height: 20px; }
+  .classify-modal { width: 860px; }
+  .classify-layout { display: flex; gap: 24px; }
+  .classify-preview { flex: 0 0 340px; }
+  .classify-preview img { width: 100%; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+  .classify-details { flex: 1; min-width: 0; }
+  .classify-summary { font-size: 14px; color: #495057; margin-bottom: 16px; padding: 12px; background: var(--bg); border-radius: 8px; }
+  .classify-summary strong { color: #212529; }
+  .tag-section { margin-bottom: 14px; }
+  .tag-section h3 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gray); margin-bottom: 8px; }
+  .tag-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag-btn { padding: 8px 16px; border: 2px solid var(--border); border-radius: 8px; background: #fff; font-size: 14px; font-weight: 500; font-family: var(--font); cursor: pointer; transition: all .15s; text-transform: capitalize; }
+  .tag-btn:hover { border-color: var(--primary); color: var(--primary); background: #e7f1ff; }
+  .tag-btn.selected { border-color: var(--primary); background: var(--primary); color: #fff; }
+  .tag-btn.suggested { border-color: #b6d4fe; background: #e7f1ff; }
+  .classify-filename { margin-top: 14px; }
+  .classify-filename input[type="text"] { font-family: var(--mono); font-size: 13px; }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>Auto-Scan</h1>
 
-  <!-- Scanner Connection -->
   <div class="card">
     <h2>Scanner</h2>
     <div class="connect-row">
@@ -290,7 +370,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="status disconnected" id="scanner-status">Not connected</div>
   </div>
 
-  <!-- Settings -->
   <div class="card">
     <h2>Settings</h2>
     <div class="row">
@@ -303,42 +382,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
     </div>
     <div class="row">
-      <div>
-        <label for="resolution">Resolution</label>
-        <select id="resolution">
-          <option value="150">150 DPI</option>
-          <option value="200">200 DPI</option>
-          <option value="300" selected>300 DPI</option>
-          <option value="600">600 DPI</option>
-        </select>
-      </div>
-      <div>
-        <label for="color">Color Mode</label>
-        <select id="color">
-          <option value="RGB24">Color</option>
-          <option value="Grayscale8">Grayscale</option>
-        </select>
-      </div>
+      <div><label for="resolution">Resolution</label><select id="resolution"><option value="150">150 DPI</option><option value="200">200 DPI</option><option value="300" selected>300 DPI</option><option value="600">600 DPI</option></select></div>
+      <div><label for="color">Color Mode</label><select id="color"><option value="RGB24">Color</option><option value="Grayscale8">Grayscale</option></select></div>
     </div>
-    <div>
-      <label for="output-dir">Output Directory</label>
-      <input type="text" id="output-dir" value="">
-    </div>
+    <div><label for="output-dir">Output Directory</label><input type="text" id="output-dir" value=""></div>
   </div>
 
-  <!-- Action Buttons -->
   <div class="card">
+    <div class="mode-toggle">
+      <button class="active" id="mode-auto" onclick="setMode('auto')">Automatic</button>
+      <button id="mode-assisted" onclick="setMode('assisted')">Assisted</button>
+    </div>
+    <p id="mode-desc" style="font-size:13px;color:var(--gray);margin-bottom:12px">AI automatically classifies and saves the document.</p>
     <div class="btn-row">
-      <button class="btn btn-primary" id="btn-classify" onclick="scan(true)" disabled>
-        <span class="spinner"></span>Scan &amp; Classify
-      </button>
-      <button class="btn btn-secondary" id="btn-scan" onclick="scan(false)" disabled>
-        <span class="spinner"></span>Scan Only
-      </button>
+      <button class="btn btn-primary" id="btn-classify" onclick="doScan()" disabled><span class="spinner"></span>Scan &amp; Classify</button>
+      <button class="btn btn-secondary" id="btn-scan" onclick="scanOnly()" disabled><span class="spinner"></span>Scan Only</button>
     </div>
   </div>
 
-  <!-- Results -->
   <div class="card" id="results-card" style="display:none">
     <h2>Classification Results</h2>
     <dl class="results-grid">
@@ -350,7 +411,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="output-path" id="r-path" style="display:none"></div>
   </div>
 
-  <!-- Log -->
   <div class="card">
     <h2>Activity Log</h2>
     <div class="log" id="log"></div>
@@ -359,185 +419,210 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <!-- API Key Modal -->
 <div class="modal-overlay" id="api-key-modal">
-  <div class="modal">
+  <div class="modal modal-sm">
     <h2>Anthropic API Key Required</h2>
-    <p>An API key is needed for AI document classification.<br>
-       Get one at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a></p>
+    <p>An API key is needed for AI document classification.<br>Get one at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a></p>
     <label for="api-key-input">API Key</label>
     <input type="password" id="api-key-input" placeholder="sk-ant-...">
     <div class="modal-error" id="api-key-error"></div>
     <div class="modal-btns">
-      <button class="btn btn-secondary" onclick="closeModal()">Skip</button>
+      <button class="btn btn-secondary" onclick="closeApiModal()">Skip</button>
       <button class="btn btn-primary" onclick="saveApiKey()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Classification Modal -->
+<div class="modal-overlay" id="classify-modal">
+  <div class="modal classify-modal">
+    <h2>Classify Document</h2>
+    <div class="classify-layout">
+      <div class="classify-preview">
+        <img id="classify-img" src="" alt="Document preview">
+      </div>
+      <div class="classify-details">
+        <div class="classify-summary" id="classify-summary"></div>
+        <div class="tag-section">
+          <h3>Suggested</h3>
+          <div class="tag-grid" id="suggested-tags"></div>
+        </div>
+        <div class="tag-section">
+          <h3>All Categories</h3>
+          <div class="tag-grid" id="all-tags"></div>
+        </div>
+        <div class="classify-filename">
+          <label for="classify-fn">Filename</label>
+          <input type="text" id="classify-fn" value="">
+        </div>
+        <div class="modal-btns">
+          <button class="btn btn-secondary" onclick="cancelClassify()">Cancel</button>
+          <button class="btn btn-primary" id="btn-save-classify" onclick="saveClassified()">Save</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
+let currentMode = 'auto';
+let selectedCategory = null;
 
-// Init: check API key and show modal if missing
 (async function init() {
-  if (!$('#output-dir').value) {
-    $('#output-dir').value = '~/Documents/Scans';
-  }
+  if (!$('#output-dir').value) $('#output-dir').value = '~/Documents/Scans';
   try {
     const res = await fetch('/api/config');
     const data = await res.json();
-    if (!data.has_api_key) {
-      $('#api-key-modal').classList.add('active');
-      $('#api-key-input').focus();
-    }
+    if (!data.has_api_key) { $('#api-key-modal').classList.add('active'); $('#api-key-input').focus(); }
   } catch(e) {}
   refreshLog();
 })();
 
-// Modal functions
-function closeModal() {
-  $('#api-key-modal').classList.remove('active');
+function setMode(mode) {
+  currentMode = mode;
+  $('#mode-auto').classList.toggle('active', mode === 'auto');
+  $('#mode-assisted').classList.toggle('active', mode === 'assisted');
+  $('#mode-desc').textContent = mode === 'auto'
+    ? 'AI automatically classifies and saves the document.'
+    : 'Scan and review AI suggestions before saving.';
 }
 
+function closeApiModal() { $('#api-key-modal').classList.remove('active'); }
 async function saveApiKey() {
   const key = $('#api-key-input').value.trim();
   const err = $('#api-key-error');
-
-  if (!key) {
-    err.textContent = 'Please enter an API key.';
-    return;
-  }
-  if (!key.startsWith('sk-ant-')) {
-    err.textContent = 'Key should start with sk-ant-...';
-    return;
-  }
-
+  if (!key) { err.textContent = 'Please enter an API key.'; return; }
   err.textContent = 'Saving...';
   try {
-    const res = await fetch('/api/save-key', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({key})
-    });
+    const res = await fetch('/api/save-key', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({key}) });
     const data = await res.json();
-    if (data.ok) {
-      closeModal();
-      refreshLog();
-    } else {
-      err.textContent = data.error || 'Failed to save.';
-    }
-  } catch(e) {
-    err.textContent = 'Network error: ' + e.message;
-  }
+    if (data.ok) { closeApiModal(); refreshLog(); } else { err.textContent = data.error; }
+  } catch(e) { err.textContent = 'Error: ' + e.message; }
 }
+$('#api-key-input').addEventListener('keydown', e => { if (e.key === 'Enter') saveApiKey(); });
 
-// Handle Enter key in modal
-$('#api-key-input').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') saveApiKey();
-});
-
-function getSource() {
-  return document.querySelector('input[name="source"]:checked').value;
+function getScanParams() {
+  return { source: document.querySelector('input[name="source"]:checked').value, resolution: $('#resolution').value, color: $('#color').value, output_dir: $('#output-dir').value, scanner_ip: $('#scanner-ip').value.trim() };
 }
-
 function setBusy(busy) {
-  $('#btn-classify').disabled = busy;
-  $('#btn-scan').disabled = busy;
-  if (busy) {
-    $('#btn-classify').classList.add('busy');
-    $('#btn-scan').classList.add('busy');
-  } else {
-    $('#btn-classify').classList.remove('busy');
-    $('#btn-scan').classList.remove('busy');
-  }
+  $('#btn-classify').disabled = busy; $('#btn-scan').disabled = busy;
+  ['#btn-classify','#btn-scan'].forEach(s => $(s).classList.toggle('busy', busy));
 }
 
 async function connect() {
   const ip = $('#scanner-ip').value.trim();
   const st = $('#scanner-status');
-  st.textContent = 'Connecting...';
-  st.className = 'status disconnected';
-
+  st.textContent = 'Connecting...'; st.className = 'status disconnected';
   try {
-    const res = await fetch('/api/connect', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ip})
-    });
+    const res = await fetch('/api/connect', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ip}) });
     const data = await res.json();
-    if (data.ok) {
-      st.textContent = data.name + ' \u2014 ' + data.state;
-      st.className = 'status connected';
-      $('#btn-classify').disabled = false;
-      $('#btn-scan').disabled = false;
-    } else {
-      st.textContent = 'Error: ' + data.error;
-      st.className = 'status error';
-    }
-  } catch(e) {
-    st.textContent = 'Connection failed: ' + e.message;
-    st.className = 'status error';
-  }
+    if (data.ok) { st.textContent = data.name + ' \u2014 ' + data.state; st.className = 'status connected'; $('#btn-classify').disabled = false; $('#btn-scan').disabled = false; }
+    else { st.textContent = 'Error: ' + data.error; st.className = 'status error'; }
+  } catch(e) { st.textContent = 'Failed: ' + e.message; st.className = 'status error'; }
   refreshLog();
 }
 
-async function scan(classify) {
-  setBusy(true);
-  $('#results-card').style.display = 'none';
-
+async function scanOnly() {
+  setBusy(true); $('#results-card').style.display = 'none';
   try {
-    const res = await fetch('/api/scan', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        classify,
-        source: getSource(),
-        resolution: $('#resolution').value,
-        color: $('#color').value,
-        output_dir: $('#output-dir').value,
-        scanner_ip: $('#scanner-ip').value.trim(),
-      })
-    });
+    const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: false}) });
     const data = await res.json();
+    if (data.ok && data.output_path) { showResult('unsorted', data.output_path.split('/').pop(), 'Saved without classification', '--', data.output_path); }
+    else if (!data.ok) alert('Error: ' + data.error);
+  } catch(e) { alert('Failed: ' + e.message); }
+  setBusy(false); refreshLog();
+}
 
-    if (data.ok) {
-      if (data.classified) {
-        $('#results-card').style.display = '';
-        $('#r-category').textContent = data.category;
-        $('#r-filename').textContent = data.filename;
-        $('#r-summary').textContent = data.summary;
-        $('#r-date').textContent = data.date || '--';
-      }
-      if (data.output_path) {
-        $('#r-path').textContent = 'Saved to: ' + data.output_path;
-        $('#r-path').style.display = '';
-        if (!data.classified) {
-          $('#results-card').style.display = '';
-          $('#r-category').textContent = 'unsorted';
-          $('#r-filename').textContent = data.output_path.split('/').pop();
-          $('#r-summary').textContent = 'Saved without classification';
-          $('#r-date').textContent = '--';
-        }
-      }
-    } else {
-      alert('Error: ' + data.error);
-    }
-  } catch(e) {
-    alert('Request failed: ' + e.message);
-  }
+function doScan() { return currentMode === 'auto' ? doScanAuto() : doScanAssisted(); }
 
-  setBusy(false);
+async function doScanAuto() {
+  setBusy(true); $('#results-card').style.display = 'none';
+  try {
+    const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: true}) });
+    const data = await res.json();
+    if (data.ok && data.classified) { showResult(data.category, data.filename, data.summary, data.date, data.output_path); }
+    else if (!data.ok) alert('Error: ' + data.error);
+  } catch(e) { alert('Failed: ' + e.message); }
+  setBusy(false); refreshLog();
+}
+
+async function doScanAssisted() {
+  setBusy(true); $('#results-card').style.display = 'none';
+  try {
+    const res = await fetch('/api/scan-assisted', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(getScanParams()) });
+    const data = await res.json();
+    if (data.ok) showClassifyModal(data);
+    else alert('Error: ' + data.error);
+  } catch(e) { alert('Failed: ' + e.message); }
+  setBusy(false); refreshLog();
+}
+
+function showResult(cat, fn, summary, date, path) {
+  $('#results-card').style.display = '';
+  $('#r-category').textContent = cat;
+  $('#r-filename').textContent = fn;
+  $('#r-summary').textContent = summary;
+  $('#r-date').textContent = date || '--';
+  $('#r-path').textContent = 'Saved to: ' + path;
+  $('#r-path').style.display = '';
+}
+
+function showClassifyModal(data) {
+  $('#classify-img').src = 'data:image/jpeg;base64,' + data.preview;
+  $('#classify-summary').innerHTML = '<strong>' + (data.summary || '') + '</strong><br>Date: ' + (data.date || 'Unknown');
+  $('#classify-fn').value = data.filename || '';
+  selectedCategory = data.category;
+
+  const suggestedEl = $('#suggested-tags');
+  suggestedEl.innerHTML = '';
+  (data.suggested_categories || []).forEach(cat => {
+    const btn = document.createElement('button');
+    btn.className = 'tag-btn suggested' + (cat === selectedCategory ? ' selected' : '');
+    btn.textContent = cat;
+    btn.onclick = () => selectCategory(cat);
+    suggestedEl.appendChild(btn);
+  });
+
+  const suggested = new Set(data.suggested_categories || []);
+  const allEl = $('#all-tags');
+  allEl.innerHTML = '';
+  (data.all_categories || []).filter(c => !suggested.has(c)).forEach(cat => {
+    const btn = document.createElement('button');
+    btn.className = 'tag-btn';
+    btn.textContent = cat;
+    btn.onclick = () => selectCategory(cat);
+    allEl.appendChild(btn);
+  });
+
+  $('#classify-modal').classList.add('active');
+}
+
+function selectCategory(cat) {
+  selectedCategory = cat;
+  document.querySelectorAll('.tag-btn').forEach(btn => btn.classList.toggle('selected', btn.textContent === cat));
+  const fn = $('#classify-fn').value;
+  const parts = fn.split('_');
+  if (parts.length >= 3) { parts[1] = cat; $('#classify-fn').value = parts.join('_'); }
+}
+
+function cancelClassify() { $('#classify-modal').classList.remove('active'); }
+
+async function saveClassified() {
+  if (!selectedCategory) { alert('Please select a category.'); return; }
+  $('#btn-save-classify').disabled = true;
+  try {
+    const res = await fetch('/api/save-classified', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ category: selectedCategory, filename: $('#classify-fn').value, output_dir: $('#output-dir').value }) });
+    const data = await res.json();
+    if (data.ok) { $('#classify-modal').classList.remove('active'); showResult(data.category, $('#classify-fn').value, '', '--', data.output_path); }
+    else alert('Error: ' + data.error);
+  } catch(e) { alert('Failed: ' + e.message); }
+  $('#btn-save-classify').disabled = false;
   refreshLog();
 }
 
 async function refreshLog() {
-  try {
-    const res = await fetch('/api/logs');
-    const logs = await res.json();
-    const el = $('#log');
-    el.textContent = logs.join('\n');
-    el.scrollTop = el.scrollHeight;
-  } catch(e) {}
+  try { const res = await fetch('/api/logs'); const logs = await res.json(); const el = $('#log'); el.textContent = logs.join('\n'); el.scrollTop = el.scrollHeight; } catch(e) {}
 }
-
 setInterval(refreshLog, 2000);
 </script>
 </body>
@@ -548,7 +633,7 @@ def main() -> None:
     port = 8470
 
     try:
-        config = load_config()
+        load_config()
         _log("Config loaded")
     except RuntimeError:
         _log("Warning: No ANTHROPIC_API_KEY found. Set it in .env for AI classification.")
