@@ -16,9 +16,6 @@ dependencies = [
 auto-scan = "auto_scan.cli:main"
 auto-scan-gui = "auto_scan.gui:main"
 
-[project.optional-dependencies]
-gui = ["customtkinter"]
-
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"

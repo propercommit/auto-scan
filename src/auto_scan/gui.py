@@ -1,4 +1,4 @@
-"""GUI for auto-scan using customtkinter."""
+"""GUI for auto-scan using tkinter + ttk."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog
-
-import customtkinter as ctk
+from tkinter import filedialog, ttk
 
 from auto_scan import AutoScanError
 from auto_scan.analyzer import DocumentInfo, analyze_document
@@ -18,19 +16,22 @@ from auto_scan.scanner.discovery import ScannerInfo, discover_scanner, scanner_i
 from auto_scan.scanner.escl import ESCLClient, ScanSettings
 
 
-class AutoScanApp(ctk.CTk):
+class AutoScanApp:
     def __init__(self) -> None:
-        super().__init__()
+        self.root = tk.Tk()
+        self.root.title("Auto-Scan")
+        self.root.geometry("720x760")
+        self.root.minsize(600, 680)
 
-        self.title("Auto-Scan")
-        self.geometry("700x780")
-        self.minsize(600, 700)
-
-        ctk.set_appearance_mode("system")
-        ctk.set_default_color_theme("blue")
+        # Use native macOS styling
+        style = ttk.Style()
+        style.theme_use("aqua")
+        style.configure("Header.TLabel", font=("Helvetica", 13, "bold"))
+        style.configure("Status.TLabel", foreground="gray")
+        style.configure("StatusOK.TLabel", foreground="green")
+        style.configure("Big.TButton", padding=(12, 8))
 
         self.scanner_info: ScannerInfo | None = None
-        self.escl_client: ESCLClient | None = None
         self.scanned_images: list[bytes] = []
         self.doc_info: DocumentInfo | None = None
         self.config: Config | None = None
@@ -41,149 +42,136 @@ class AutoScanApp(ctk.CTk):
     # ── UI Construction ──────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.grid_columnconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
 
+        pad = {"padx": 12, "pady": 4}
         row = 0
 
         # --- Scanner Connection ---
-        self.scanner_frame = ctk.CTkFrame(self)
-        self.scanner_frame.grid(row=row, column=0, padx=12, pady=(12, 6), sticky="ew")
-        self.scanner_frame.grid_columnconfigure(1, weight=1)
+        scanner_frame = ttk.LabelFrame(self.root, text="Scanner", padding=8)
+        scanner_frame.grid(row=row, column=0, padx=12, pady=(12, 4), sticky="ew")
+        scanner_frame.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.scanner_frame, text="Scanner", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, padx=12, pady=(10, 2), sticky="w"
+        self.scanner_status_label = ttk.Label(
+            scanner_frame, text="Not connected", style="Status.TLabel"
         )
+        self.scanner_status_label.grid(row=0, column=0, columnspan=3, **pad, sticky="w")
 
-        self.scanner_status_label = ctk.CTkLabel(
-            self.scanner_frame, text="Not connected", text_color="gray"
-        )
-        self.scanner_status_label.grid(row=0, column=1, padx=12, pady=(10, 2), sticky="w")
+        ttk.Label(scanner_frame, text="IP:").grid(row=1, column=0, padx=(12, 4), pady=4, sticky="w")
+        self.scanner_ip_var = tk.StringVar()
+        self.scanner_ip_entry = ttk.Entry(scanner_frame, textvariable=self.scanner_ip_var)
+        self.scanner_ip_entry.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self.scanner_ip_entry.insert(0, "")
 
-        self.scanner_ip_entry = ctk.CTkEntry(
-            self.scanner_frame, placeholder_text="Scanner IP (leave blank for auto-discover)"
-        )
-        self.scanner_ip_entry.grid(row=1, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
-
-        self.connect_btn = ctk.CTkButton(
-            self.scanner_frame, text="Connect", command=self._on_connect
-        )
+        self.connect_btn = ttk.Button(scanner_frame, text="Connect", command=self._on_connect)
         self.connect_btn.grid(row=1, column=2, padx=(4, 12), pady=4)
+
+        ttk.Label(scanner_frame, text="Leave IP blank for auto-discover", foreground="gray").grid(
+            row=2, column=0, columnspan=3, padx=12, pady=(0, 4), sticky="w"
+        )
 
         row += 1
 
         # --- Scan Settings ---
-        self.settings_frame = ctk.CTkFrame(self)
-        self.settings_frame.grid(row=row, column=0, padx=12, pady=6, sticky="ew")
-        self.settings_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(self.settings_frame, text="Settings", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, columnspan=4, padx=12, pady=(10, 6), sticky="w"
-        )
+        settings_frame = ttk.LabelFrame(self.root, text="Settings", padding=8)
+        settings_frame.grid(row=row, column=0, padx=12, pady=4, sticky="ew")
+        settings_frame.columnconfigure(1, weight=1)
 
         # Source
-        ctk.CTkLabel(self.settings_frame, text="Source:").grid(row=1, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.source_var = ctk.StringVar(value="Feeder")
-        self.source_menu = ctk.CTkSegmentedButton(
-            self.settings_frame, values=["Feeder", "Platen"], variable=self.source_var
-        )
-        self.source_menu.grid(row=1, column=1, padx=4, pady=4, sticky="w")
+        ttk.Label(settings_frame, text="Source:").grid(row=0, column=0, padx=(12, 4), pady=4, sticky="w")
+        self.source_var = tk.StringVar(value="Feeder")
+        source_frame = ttk.Frame(settings_frame)
+        source_frame.grid(row=0, column=1, columnspan=3, padx=4, pady=4, sticky="w")
+        ttk.Radiobutton(source_frame, text="Document Feeder (ADF)", variable=self.source_var, value="Feeder").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(source_frame, text="Flatbed", variable=self.source_var, value="Platen").pack(side="left")
 
         # Resolution
-        ctk.CTkLabel(self.settings_frame, text="DPI:").grid(row=1, column=2, padx=(12, 4), pady=4, sticky="w")
-        self.resolution_var = ctk.StringVar(value="300")
-        self.resolution_menu = ctk.CTkOptionMenu(
-            self.settings_frame, values=["150", "200", "300", "600"], variable=self.resolution_var, width=80
+        ttk.Label(settings_frame, text="Resolution:").grid(row=1, column=0, padx=(12, 4), pady=4, sticky="w")
+        self.resolution_var = tk.StringVar(value="300")
+        res_combo = ttk.Combobox(
+            settings_frame, textvariable=self.resolution_var,
+            values=["150", "200", "300", "600"], state="readonly", width=8
         )
-        self.resolution_menu.grid(row=1, column=3, padx=(4, 12), pady=4, sticky="w")
+        res_combo.grid(row=1, column=1, padx=4, pady=4, sticky="w")
+        ttk.Label(settings_frame, text="DPI").grid(row=1, column=2, padx=0, pady=4, sticky="w")
 
         # Color mode
-        ctk.CTkLabel(self.settings_frame, text="Color:").grid(row=2, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.color_var = ctk.StringVar(value="Color")
-        self.color_menu = ctk.CTkSegmentedButton(
-            self.settings_frame, values=["Color", "Grayscale"], variable=self.color_var
-        )
-        self.color_menu.grid(row=2, column=1, padx=4, pady=4, sticky="w")
+        ttk.Label(settings_frame, text="Color:").grid(row=2, column=0, padx=(12, 4), pady=4, sticky="w")
+        self.color_var = tk.StringVar(value="Color")
+        color_frame = ttk.Frame(settings_frame)
+        color_frame.grid(row=2, column=1, columnspan=3, padx=4, pady=4, sticky="w")
+        ttk.Radiobutton(color_frame, text="Color", variable=self.color_var, value="Color").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(color_frame, text="Grayscale", variable=self.color_var, value="Grayscale").pack(side="left")
 
         # Output directory
-        ctk.CTkLabel(self.settings_frame, text="Output:").grid(row=3, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.output_dir_var = ctk.StringVar(value=str(Path("~/Documents/Scans").expanduser()))
-        self.output_entry = ctk.CTkEntry(self.settings_frame, textvariable=self.output_dir_var)
-        self.output_entry.grid(row=3, column=1, columnspan=2, padx=4, pady=4, sticky="ew")
-        ctk.CTkButton(self.settings_frame, text="Browse", width=70, command=self._browse_output).grid(
+        ttk.Label(settings_frame, text="Output:").grid(row=3, column=0, padx=(12, 4), pady=4, sticky="w")
+        self.output_dir_var = tk.StringVar(value=str(Path("~/Documents/Scans").expanduser()))
+        ttk.Entry(settings_frame, textvariable=self.output_dir_var).grid(
+            row=3, column=1, columnspan=2, padx=4, pady=4, sticky="ew"
+        )
+        ttk.Button(settings_frame, text="Browse", command=self._browse_output).grid(
             row=3, column=3, padx=(4, 12), pady=4
         )
 
         row += 1
 
         # --- Action Buttons ---
-        self.action_frame = ctk.CTkFrame(self)
-        self.action_frame.grid(row=row, column=0, padx=12, pady=6, sticky="ew")
-        self.action_frame.grid_columnconfigure(0, weight=1)
-        self.action_frame.grid_columnconfigure(1, weight=1)
+        btn_frame = ttk.Frame(self.root)
+        btn_frame.grid(row=row, column=0, padx=12, pady=8, sticky="ew")
+        btn_frame.columnconfigure(0, weight=1)
+        btn_frame.columnconfigure(1, weight=1)
 
-        self.scan_btn = ctk.CTkButton(
-            self.action_frame,
-            text="Scan & Classify",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            height=44,
-            command=self._on_scan_classify,
-            state="disabled",
+        self.scan_btn = ttk.Button(
+            btn_frame, text="Scan & Classify", style="Big.TButton",
+            command=self._on_scan_classify, state="disabled"
         )
-        self.scan_btn.grid(row=0, column=0, padx=12, pady=12, sticky="ew")
+        self.scan_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
-        self.scan_only_btn = ctk.CTkButton(
-            self.action_frame,
-            text="Scan Only",
-            height=44,
-            fg_color="gray",
-            command=self._on_scan_only,
-            state="disabled",
+        self.scan_only_btn = ttk.Button(
+            btn_frame, text="Scan Only", style="Big.TButton",
+            command=self._on_scan_only, state="disabled"
         )
-        self.scan_only_btn.grid(row=0, column=1, padx=(0, 12), pady=12, sticky="ew")
+        self.scan_only_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         row += 1
 
         # --- Progress ---
-        self.progress_bar = ctk.CTkProgressBar(self)
-        self.progress_bar.grid(row=row, column=0, padx=12, pady=(0, 6), sticky="ew")
-        self.progress_bar.set(0)
+        self.progress_var = tk.IntVar(value=0)
+        self.progress_bar = ttk.Progressbar(self.root, variable=self.progress_var, maximum=100)
+        self.progress_bar.grid(row=row, column=0, padx=12, pady=(0, 4), sticky="ew")
 
         row += 1
 
         # --- Results ---
-        self.results_frame = ctk.CTkFrame(self)
-        self.results_frame.grid(row=row, column=0, padx=12, pady=6, sticky="ew")
-        self.results_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(self.results_frame, text="Results", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, columnspan=2, padx=12, pady=(10, 6), sticky="w"
-        )
+        results_frame = ttk.LabelFrame(self.root, text="Classification Results", padding=8)
+        results_frame.grid(row=row, column=0, padx=12, pady=4, sticky="ew")
+        results_frame.columnconfigure(1, weight=1)
 
         labels = ["Category:", "Filename:", "Summary:", "Date:"]
-        self.result_values: list[ctk.CTkLabel] = []
+        self.result_values: list[ttk.Label] = []
         for i, label_text in enumerate(labels):
-            ctk.CTkLabel(self.results_frame, text=label_text).grid(
-                row=i + 1, column=0, padx=(12, 4), pady=2, sticky="nw"
+            ttk.Label(results_frame, text=label_text, font=("Helvetica", 12, "bold")).grid(
+                row=i, column=0, padx=(12, 8), pady=3, sticky="nw"
             )
-            val = ctk.CTkLabel(self.results_frame, text="—", wraplength=450, anchor="w", justify="left")
-            val.grid(row=i + 1, column=1, padx=(4, 12), pady=2, sticky="w")
+            val = ttk.Label(results_frame, text="--", wraplength=450, anchor="w", justify="left")
+            val.grid(row=i, column=1, padx=(0, 12), pady=3, sticky="w")
             self.result_values.append(val)
 
         row += 1
 
         # --- Log ---
-        self.log_frame = ctk.CTkFrame(self)
-        self.log_frame.grid(row=row, column=0, padx=12, pady=(6, 12), sticky="nsew")
-        self.log_frame.grid_columnconfigure(0, weight=1)
-        self.log_frame.grid_rowconfigure(1, weight=1)
-        self.grid_rowconfigure(row, weight=1)
+        log_frame = ttk.LabelFrame(self.root, text="Activity Log", padding=8)
+        log_frame.grid(row=row, column=0, padx=12, pady=(4, 12), sticky="nsew")
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        self.root.rowconfigure(row, weight=1)
 
-        ctk.CTkLabel(self.log_frame, text="Log", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, padx=12, pady=(10, 4), sticky="w"
-        )
-
-        self.log_text = ctk.CTkTextbox(self.log_frame, height=140, state="disabled")
-        self.log_text.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled",
+                                bg="#f5f5f5", font=("Menlo", 11), relief="sunken", bd=1)
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
 
     # ── Helpers ──────────────────────────────────────────────────────
 
@@ -194,28 +182,29 @@ class AutoScanApp(ctk.CTk):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    def _set_scanner_status(self, text: str, color: str) -> None:
-        self.scanner_status_label.configure(text=text, text_color=color)
+    def _set_scanner_status(self, text: str, connected: bool) -> None:
+        style = "StatusOK.TLabel" if connected else "Status.TLabel"
+        self.scanner_status_label.configure(text=text, style=style)
 
     def _set_busy(self, busy: bool) -> None:
-        state = "disabled" if busy else "normal"
-        self.scan_btn.configure(state=state)
-        self.scan_only_btn.configure(state=state)
-        self.connect_btn.configure(state=state)
+        state = "disabled" if busy else "!disabled"
+        self.scan_btn.state([state])
+        self.scan_only_btn.state([state])
+        self.connect_btn.state([state])
         if busy:
             self.progress_bar.configure(mode="indeterminate")
-            self.progress_bar.start()
+            self.progress_bar.start(15)
         else:
             self.progress_bar.stop()
             self.progress_bar.configure(mode="determinate")
-            self.progress_bar.set(0)
+            self.progress_var.set(0)
 
     def _clear_results(self) -> None:
         for val in self.result_values:
-            val.configure(text="—")
+            val.configure(text="--")
 
     def _show_results(self, info: DocumentInfo) -> None:
-        texts = [info.category, info.filename, info.summary, info.date or "—"]
+        texts = [info.category, info.filename, info.summary, info.date or "--"]
         for val, text in zip(self.result_values, texts):
             val.configure(text=text)
 
@@ -229,7 +218,7 @@ class AutoScanApp(ctk.CTk):
             self.config = load_config()
             self._log("Config loaded from .env")
             if self.config.scanner_ip:
-                self.scanner_ip_entry.insert(0, self.config.scanner_ip)
+                self.scanner_ip_var.set(self.config.scanner_ip)
         except RuntimeError:
             self._log("No ANTHROPIC_API_KEY found. Set it in .env for AI classification.")
 
@@ -242,7 +231,7 @@ class AutoScanApp(ctk.CTk):
             "resolution": int(self.resolution_var.get()),
             "output_dir": self.output_dir_var.get(),
         }
-        ip = self.scanner_ip_entry.get().strip()
+        ip = self.scanner_ip_var.get().strip()
         if ip:
             overrides["scanner_ip"] = ip
         return load_config(**overrides)
@@ -254,9 +243,9 @@ class AutoScanApp(ctk.CTk):
             try:
                 target(*args)
             except Exception as e:
-                self.after(0, lambda: self._on_task_error(e))
+                self.root.after(0, lambda: self._on_task_error(e))
             finally:
-                self.after(0, lambda: self._set_busy(False))
+                self.root.after(0, lambda: self._set_busy(False))
 
         self._set_busy(True)
         threading.Thread(target=wrapper, daemon=True).start()
@@ -270,32 +259,32 @@ class AutoScanApp(ctk.CTk):
         self._run_in_thread(self._connect_scanner)
 
     def _connect_scanner(self) -> None:
-        ip = self.scanner_ip_entry.get().strip()
+        ip = self.scanner_ip_var.get().strip()
 
         if ip:
-            self.after(0, lambda: self._log(f"Connecting to {ip}..."))
+            self.root.after(0, lambda: self._log(f"Connecting to {ip}..."))
             info = scanner_info_from_ip(ip)
         else:
-            self.after(0, lambda: self._log("Searching for Canon scanner..."))
+            self.root.after(0, lambda: self._log("Searching for Canon scanner..."))
             info = discover_scanner(timeout=8.0)
 
         # Test the connection
         client = ESCLClient(info.base_url)
         status = client.get_status()
         caps = client.get_capabilities()
+        client.close()
 
         self.scanner_info = info
-        self.escl_client = client
 
         def update_ui():
-            self._set_scanner_status(f"{info.name}  ●  {status.state}", "green")
+            self._set_scanner_status(f"{info.name}  --  {status.state}", True)
             self._log(f"Connected: {info.name} at {info.ip}")
             self._log(f"  State: {status.state}, ADF: {status.adf_state or 'N/A'}")
             self._log(f"  Sources: {caps.sources}, Resolutions: {caps.resolutions}")
-            self.scan_btn.configure(state="normal")
-            self.scan_only_btn.configure(state="normal")
+            self.scan_btn.state(["!disabled"])
+            self.scan_only_btn.state(["!disabled"])
 
-        self.after(0, update_ui)
+        self.root.after(0, update_ui)
 
     def _on_scan_classify(self) -> None:
         self._clear_results()
@@ -312,48 +301,50 @@ class AutoScanApp(ctk.CTk):
         if self.scanner_info is None:
             self._connect_scanner()
 
-        client = ESCLClient(self.scanner_info.base_url)
+        with ESCLClient(self.scanner_info.base_url) as client:
+            # Check status
+            status = client.get_status()
+            if status.state != "Idle":
+                raise AutoScanError(f"Scanner is {status.state}. Wait and try again.")
 
-        # Check status
-        status = client.get_status()
-        if status.state != "Idle":
-            raise AutoScanError(f"Scanner is {status.state}. Wait and try again.")
+            self.root.after(0, lambda: self._log("Scanning..."))
 
-        self.after(0, lambda: self._log("Scanning..."))
+            settings = ScanSettings(
+                source=config.scan_source,
+                color_mode=config.color_mode,
+                resolution=config.resolution,
+                document_format=config.scan_format,
+            )
+            images = client.scan(settings)
 
-        settings = ScanSettings(
-            source=config.scan_source,
-            color_mode=config.color_mode,
-            resolution=config.resolution,
-            document_format=config.scan_format,
-        )
-        images = client.scan(settings)
         self.scanned_images = images
-
-        self.after(0, lambda: self._log(f"Scanned {len(images)} page(s)"))
+        self.root.after(0, lambda: self._log(f"Scanned {len(images)} page(s)"))
 
         if classify:
-            self.after(0, lambda: self._log("Analyzing with Claude Vision..."))
-            self.after(0, lambda: self.progress_bar.set(0.5))
+            self.root.after(0, lambda: self._log("Analyzing with Claude Vision..."))
+            self.root.after(0, lambda: self.progress_var.set(50))
 
             doc_info = analyze_document(images, config)
             self.doc_info = doc_info
 
-            self.after(0, lambda: self._show_results(doc_info))
-            self.after(0, lambda: self._log(f"Classified as: {doc_info.category}"))
+            self.root.after(0, lambda: self._show_results(doc_info))
+            self.root.after(0, lambda: self._log(f"Classified as: {doc_info.category}"))
 
             output_path = save_document(images, doc_info, config)
-            self.after(0, lambda: self._log(f"Saved: {output_path}"))
-            self.after(0, lambda: self.progress_bar.set(1.0))
+            self.root.after(0, lambda: self._log(f"Saved: {output_path}"))
+            self.root.after(0, lambda: self.progress_var.set(100))
         else:
             output_path = save_unclassified(images, config)
-            self.after(0, lambda: self._log(f"Saved (unclassified): {output_path}"))
-            self.after(0, lambda: self.progress_bar.set(1.0))
+            self.root.after(0, lambda: self._log(f"Saved (unclassified): {output_path}"))
+            self.root.after(0, lambda: self.progress_var.set(100))
+
+    def run(self) -> None:
+        self.root.mainloop()
 
 
 def main() -> None:
     app = AutoScanApp()
-    app.mainloop()
+    app.run()
 
 
 if __name__ == "__main__":

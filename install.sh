@@ -57,8 +57,8 @@ source .venv/bin/activate
 info "Upgrading pip..."
 pip install --upgrade pip --quiet
 
-info "Installing auto-scan with GUI..."
-pip install -e ".[gui]" --quiet
+info "Installing auto-scan..."
+pip install -e . --quiet
 
 success "All dependencies installed"
 
@@ -68,7 +68,7 @@ if [ ! -f ".env" ]; then
     cp .env.example .env
 
     echo ""
-    echo -e "${BOLD}An Anthropic API key is required for AI document classification.${NC}"
+    echo "An Anthropic API key is required for AI document classification."
     echo "Get one at: https://console.anthropic.com"
     echo ""
     read -rp "Enter your Anthropic API key (or press Enter to skip): " api_key
