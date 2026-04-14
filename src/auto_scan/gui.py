@@ -528,14 +528,20 @@ def _run_scan_job(data: dict, mode: str):
 
         # ── Privacy check: run local OCR, redact, pause for confirmation ──
         page_redactions = {}  # tracks which pages had redactions (1-indexed)
+        if not redact:
+            if reckless:
+                _log("OCR privacy check: skipped (reckless mode)")
+            else:
+                _log("OCR privacy check: disabled in settings")
         if redact and not reckless:
-            import time
+            import time as _time
             from auto_scan.redactor import redact_image
 
             with _state_lock:
                 state["job"]["status"] = "checking_privacy"
-            _log("Running local OCR to check for sensitive data...")
+            _log(f"OCR privacy check: scanning {len(images)} page(s)...")
 
+            t0 = _time.monotonic()
             total_redactions = 0
             all_redacted_types = set()
             redaction_skipped = False
@@ -549,20 +555,24 @@ def _run_scan_job(data: dict, mode: str):
                 if r.skipped:
                     redaction_skipped = True
                     skip_reason = r.skip_reason
+            elapsed = _time.monotonic() - t0
 
             # Build redaction report and pause for user confirmation
             if redaction_skipped:
-                _log(f"Redaction SKIPPED: {skip_reason}")
+                _log(f"OCR privacy check: SKIPPED — {skip_reason}")
                 redaction_info = {"status": "skipped", "reason": skip_reason}
             elif total_redactions > 0:
-                _log(f"Found & redacted {total_redactions} sensitive region(s) [{', '.join(sorted(all_redacted_types))}]")
+                types_str = ", ".join(sorted(all_redacted_types))
+                _log(f"OCR privacy check: {total_redactions} region(s) redacted [{types_str}] in {elapsed:.1f}s")
+                for pg, info in sorted(page_redactions.items()):
+                    _log(f"  Page {pg}: {info['count']} region(s) [{', '.join(info['types'])}]")
                 redaction_info = {
                     "status": "redacted",
                     "count": total_redactions,
                     "types": sorted(all_redacted_types),
                 }
             else:
-                _log("No sensitive data detected in scanned pages")
+                _log(f"OCR privacy check: clean — no sensitive data found ({elapsed:.1f}s)")
                 redaction_info = {"status": "clean"}
 
             with _state_lock:
@@ -571,8 +581,9 @@ def _run_scan_job(data: dict, mode: str):
                 state["job"]["page_redactions"] = page_redactions
 
             # Wait for user to confirm or cancel
+            _log("Waiting for user confirmation...")
             for _ in range(600):  # 10 min max wait
-                time.sleep(1)
+                _time.sleep(1)
                 with _state_lock:
                     if state["job"].get("user_confirmed"):
                         break
@@ -583,7 +594,7 @@ def _run_scan_job(data: dict, mode: str):
                             "result": {"ok": False, "error": "Cancelled: documents not sent to AI."},
                         }
                         return
-            _log("User confirmed — sending to AI")
+            _log("User confirmed — proceeding to AI analysis")
 
         if mode == "auto":
             classify = data.get("classify", True)
