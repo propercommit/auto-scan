@@ -157,6 +157,82 @@ def api_save_settings():
     return jsonify({"ok": True})
 
 
+@app.route("/api/test-ocr", methods=["POST"])
+def api_test_ocr():
+    """Generate a test image with fake sensitive data and run OCR + redaction on it."""
+    import shutil
+    import time
+
+    result = {"tesseract": False, "pytesseract": False, "ocr_works": False, "redaction_works": False, "details": ""}
+
+    # Check tesseract binary
+    if not shutil.which("tesseract"):
+        result["details"] = "tesseract is not installed. Run: brew install tesseract"
+        return jsonify(result)
+    result["tesseract"] = True
+
+    # Check pytesseract module
+    try:
+        import pytesseract
+    except ImportError:
+        result["details"] = "pytesseract Python package not installed. Run: pip install pytesseract"
+        return jsonify(result)
+    result["pytesseract"] = True
+
+    # Generate a test image with known sensitive data
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        img = Image.new("RGB", (600, 200), "white")
+        draw = ImageDraw.Draw(img)
+        # Use default font (always available)
+        draw.text((20, 20), "SSN: 123-45-6789", fill="black")
+        draw.text((20, 60), "IBAN: CH93 0076 2011 6238 5295 7", fill="black")
+        draw.text((20, 100), "Card: 4111 1111 1111 1111", fill="black")
+        draw.text((20, 140), "This is a normal line of text.", fill="black")
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        test_bytes = buf.getvalue()
+    except Exception as e:
+        result["details"] = f"Failed to create test image: {e}"
+        return jsonify(result)
+
+    # Run OCR to verify it reads text
+    try:
+        ocr_text = pytesseract.image_to_string(img)
+        if len(ocr_text.strip()) < 5:
+            result["details"] = "OCR returned no text. Tesseract may not be configured correctly."
+            return jsonify(result)
+        result["ocr_works"] = True
+    except Exception as e:
+        result["details"] = f"OCR failed: {e}"
+        return jsonify(result)
+
+    # Run the full redaction pipeline
+    try:
+        from auto_scan.redactor import redact_image
+
+        t0 = time.monotonic()
+        r = redact_image(test_bytes, enabled_patterns={"ssn", "iban", "credit_card"})
+        elapsed = time.monotonic() - t0
+
+        if r.skipped:
+            result["details"] = f"Redaction skipped: {r.skip_reason}"
+            return jsonify(result)
+
+        result["redaction_works"] = r.redaction_count > 0
+        found = ", ".join(r.redacted_types) if r.redacted_types else "none"
+        result["details"] = (
+            f"OCR + redaction working. Found {r.redaction_count} region(s) "
+            f"[{found}] in {elapsed:.1f}s"
+        )
+    except Exception as e:
+        result["details"] = f"Redaction failed: {e}"
+
+    return jsonify(result)
+
+
 @app.route("/api/save-key", methods=["POST"])
 def api_save_key():
     data = request.json or {}
@@ -1311,6 +1387,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <span>Redact sensitive data before sending to AI</span>
       </label>
       <div class="field-hint">Uses local OCR to detect and black out sensitive patterns in images before they reach the API. Requires <code>tesseract</code> and <code>pytesseract</code>.</div>
+      <div style="margin-top:8px"><button class="btn btn-secondary" id="btn-test-ocr" style="width:auto;padding:6px 14px;font-size:13px" onclick="testOCR()">Test OCR</button><span id="ocr-test-result" style="margin-left:10px;font-size:13px"></span></div>
       <div id="redact-patterns" style="display:none;margin-top:8px;padding-left:26px">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="ssn" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> SSN (US Social Security)</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="ahv" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> AHV/AVS (Swiss)</label>
@@ -1522,6 +1599,34 @@ $('#reckless-toggle').addEventListener('change', function() {
   updateRecklessState(this.checked);
   saveSettings();
 });
+
+async function testOCR() {
+  const btn = $('#btn-test-ocr');
+  const result = $('#ocr-test-result');
+  btn.disabled = true;
+  btn.textContent = 'Testing...';
+  result.textContent = '';
+  result.style.color = '';
+  try {
+    const res = await fetch('/api/test-ocr', { method: 'POST' });
+    const data = await res.json();
+    if (data.redaction_works) {
+      result.style.color = '#16a34a';
+      result.innerHTML = '<strong>All good!</strong> ' + data.details;
+    } else if (data.ocr_works) {
+      result.style.color = '#d97706';
+      result.innerHTML = '<strong>OCR works but no patterns matched.</strong> ' + data.details;
+    } else {
+      result.style.color = '#dc2626';
+      result.innerHTML = '<strong>Failed:</strong> ' + data.details;
+    }
+  } catch(e) {
+    result.style.color = '#dc2626';
+    result.textContent = 'Request failed: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Test OCR';
+}
 
 function saveSettings() {
   const settings = {
