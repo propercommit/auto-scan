@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import io
 import os
+import platform
+import subprocess
 import threading
 import webbrowser
 from datetime import datetime
@@ -100,6 +102,69 @@ def api_save_key():
     os.environ["ANTHROPIC_API_KEY"] = key
     _log("API key saved and loaded")
     return jsonify({"ok": True})
+
+
+@app.route("/api/browse-folder", methods=["POST"])
+def api_browse_folder():
+    """Open a native OS folder picker and return the selected path."""
+    data = request.json or {}
+    start_dir = data.get("current", "")
+    if start_dir:
+        start_dir = str(Path(start_dir).expanduser())
+    try:
+        selected = _open_folder_dialog(start_dir)
+        if selected:
+            return jsonify({"ok": True, "path": selected})
+        return jsonify({"ok": False, "error": "No folder selected"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _open_folder_dialog(start_dir: str = "") -> str | None:
+    """Open a native folder picker dialog. Returns path or None if cancelled."""
+    system = platform.system()
+
+    if system == "Darwin":
+        script = 'set p to POSIX path of (choose folder'
+        if start_dir and Path(start_dir).is_dir():
+            script += f' default location POSIX file "{start_dir}"'
+        script += ')\nreturn p'
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().rstrip("/")
+        return None
+
+    if system == "Linux":
+        cmd = ["zenity", "--file-selection", "--directory", "--title=Select Output Folder"]
+        if start_dir and Path(start_dir).is_dir():
+            cmd.append(f"--filename={start_dir}/")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+
+    if system == "Windows":
+        ps_script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        )
+        if start_dir and Path(start_dir).is_dir():
+            ps_script += f'$d.SelectedPath = "{start_dir}"; '
+        ps_script += (
+            "$d.Description = 'Select Output Folder'; "
+            "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath } else { '' }"
+        )
+        result = subprocess.run(
+            ["powershell", "-Command", ps_script],
+            capture_output=True, text=True, timeout=120,
+        )
+        path = result.stdout.strip()
+        return path if path else None
+
+    return None
 
 
 @app.route("/api/connect", methods=["POST"])
@@ -352,6 +417,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tag-btn.suggested { border-color: #b6d4fe; background: #e7f1ff; }
   .classify-filename { margin-top: 14px; }
   .classify-filename input[type="text"] { font-family: var(--mono); font-size: 13px; }
+  .browse-row { display: flex; gap: 6px; align-items: center; }
+  .browse-row input { flex: 1; }
+  .btn-browse { flex-shrink: 0; width: 40px; height: 38px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #fff; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, border-color .15s; }
+  .btn-browse:hover { background: #e9ecef; border-color: var(--primary); }
 </style>
 </head>
 <body>
@@ -385,7 +454,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div><label for="resolution">Resolution</label><select id="resolution"><option value="150">150 DPI</option><option value="200">200 DPI</option><option value="300" selected>300 DPI</option><option value="600">600 DPI</option></select></div>
       <div><label for="color">Color Mode</label><select id="color"><option value="RGB24">Color</option><option value="Grayscale8">Grayscale</option></select></div>
     </div>
-    <div><label for="output-dir">Output Directory</label><input type="text" id="output-dir" value=""></div>
+    <div>
+      <label for="output-dir">Output Directory</label>
+      <div class="browse-row">
+        <input type="text" id="output-dir" value="">
+        <button class="btn-browse" onclick="browseFolder()" title="Browse...">&#128193;</button>
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -500,6 +575,14 @@ async function saveApiKey() {
   } catch(e) { err.textContent = 'Error: ' + e.message; }
 }
 $('#api-key-input').addEventListener('keydown', e => { if (e.key === 'Enter') saveApiKey(); });
+
+async function browseFolder() {
+  try {
+    const res = await fetch('/api/browse-folder', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({current: $('#output-dir').value}) });
+    const data = await res.json();
+    if (data.ok) { $('#output-dir').value = data.path; }
+  } catch(e) {}
+}
 
 function getScanParams() {
   return { source: document.querySelector('input[name="source"]:checked').value, resolution: $('#resolution').value, color: $('#color').value, output_dir: $('#output-dir').value, scanner_ip: $('#scanner-ip').value.trim() };
