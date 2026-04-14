@@ -307,13 +307,10 @@ def api_scan_assisted():
 
 @app.route("/api/save-classified", methods=["POST"])
 def api_save_classified():
-    """Save pending scanned images with the user's chosen categories."""
+    """Save pending scanned images with folder + tags."""
     data = request.json or {}
-    categories = data.get("categories", [])
-    if not categories:
-        # Fallback for single category
-        cat = data.get("category", "other")
-        categories = [cat] if cat else ["other"]
+    folder = data.get("folder", "").strip() or "other"
+    tags = data.get("tags", [])
     filename = data.get("filename", "")
 
     images = state.get("pending_images")
@@ -330,22 +327,21 @@ def api_save_classified():
             **({"output_dir": data["output_dir"]} if data.get("output_dir") else {}),
         )
 
-        saved_paths = []
-        for cat in categories:
-            doc_info.category = cat
-            output_path = save_document(images, doc_info, config)
-            saved_paths.append(str(output_path))
-            _log(f"Saved as {cat}: {output_path}")
+        output_path = save_document(
+            images, doc_info, config, folder=folder, tags=tags,
+        )
+        _log(f"Saved to {folder}/: {output_path.name}")
+        if tags:
+            _log(f"  Tags: {', '.join(tags)}")
 
         state["pending_images"] = None
         state["pending_doc_info"] = None
 
         return jsonify({
             "ok": True,
-            "output_paths": saved_paths,
-            "output_path": saved_paths[0],
-            "categories": categories,
-            "category": categories[0],
+            "output_path": str(output_path),
+            "folder": folder,
+            "tags": tags,
         })
     except Exception as e:
         _log(f"Error: {e}")
@@ -437,7 +433,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tag-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .tag-btn.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 700; }
   .tag-btn.suggested { border-color: #9dc2f7; background: #edf3fc; color: var(--primary-text); }
-  .classify-filename { margin-top: 14px; }
+  .classify-folder { margin-top: 14px; }
+  .classify-folder input[type="text"] { font-family: var(--mono); font-size: 13px; }
+  .field-hint { font-size: 12px; color: var(--gray-light); margin-top: 3px; }
+  .classify-filename { margin-top: 10px; }
   .classify-filename input[type="text"] { font-family: var(--mono); font-size: 13px; }
   .browse-row { display: flex; gap: 6px; align-items: center; }
   .browse-row input { flex: 1; }
@@ -513,7 +512,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="card" id="results-card" style="display:none" aria-live="polite">
     <h2>Classification Results</h2>
     <dl class="results-grid">
-      <dt>Category</dt><dd id="r-category">--</dd>
+      <dt>Folder</dt><dd id="r-folder">--</dd>
+      <dt>Tags</dt><dd id="r-tags">--</dd>
       <dt>Filename</dt><dd id="r-filename">--</dd>
       <dt>Summary</dt><dd id="r-summary">--</dd>
       <dt>Date</dt><dd id="r-date">--</dd>
@@ -556,14 +556,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="classify-details">
         <div class="classify-summary" id="classify-summary"></div>
         <div class="tag-section">
-          <h3 id="suggested-label">Suggested</h3>
+          <h3 id="suggested-label">Suggested Tags</h3>
           <div class="tag-grid" id="suggested-tags" role="group" aria-labelledby="suggested-label"></div>
         </div>
         <div class="tag-section">
-          <h3 id="all-cats-label">All Categories</h3>
+          <h3 id="all-cats-label">All Tags</h3>
           <div class="tag-grid" id="all-tags" role="group" aria-labelledby="all-cats-label"></div>
         </div>
         <div class="risk-alert" id="classify-risk" style="display:none"></div>
+        <div class="classify-folder">
+          <label for="classify-folder">Save to folder</label>
+          <input type="text" id="classify-folder" value="" list="folder-suggestions">
+          <datalist id="folder-suggestions"></datalist>
+          <p class="field-hint">Subfolder inside your output directory where this document will be saved.</p>
+        </div>
         <div class="classify-filename">
           <label for="classify-fn">Filename</label>
           <input type="text" id="classify-fn" value="">
@@ -580,7 +586,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const $ = s => document.querySelector(s);
 let currentMode = 'auto';
-let selectedCategories = new Set();
+let selectedTags = new Set();
 let pendingRisk = {level: null, risks: []};
 
 (async function init() {
@@ -655,7 +661,7 @@ async function scanOnly() {
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: false}) });
     const data = await res.json();
-    if (data.ok && data.output_path) { showResult('unsorted', data.output_path.split('/').pop(), 'Saved without classification', '--', data.output_path, null, null); }
+    if (data.ok && data.output_path) { showResult({folder: 'unsorted', tags: [], filename: data.output_path.split('/').pop(), summary: 'Saved without classification', path: data.output_path}); }
     else if (!data.ok) alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
@@ -668,7 +674,7 @@ async function doScanAuto() {
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: true}) });
     const data = await res.json();
-    if (data.ok && data.classified) { showResult(data.category, data.filename, data.summary, data.date, data.output_path, data.risk_level, data.risks); }
+    if (data.ok && data.classified) { showResult({folder: data.category, tags: [data.category], filename: data.filename, summary: data.summary, date: data.date, path: data.output_path, riskLevel: data.risk_level, risks: data.risks}); }
     else if (!data.ok) alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
@@ -696,11 +702,12 @@ function renderRisk(el, level, risks) {
   el.innerHTML = '<h4>' + (icons[level]||'') + ' ' + (labels[level]||level) + '</h4><ul>' + risks.map(r => '<li>' + r + '</li>').join('') + '</ul>';
 }
 
-function showResult(cat, fn, summary, date, path, riskLevel, risks) {
+function showResult({folder, tags, filename, summary, date, path, riskLevel, risks}) {
   $('#results-card').style.display = '';
-  $('#r-category').textContent = cat;
-  $('#r-filename').textContent = fn;
-  $('#r-summary').textContent = summary;
+  $('#r-folder').textContent = folder || '--';
+  $('#r-tags').textContent = (tags && tags.length) ? tags.join(', ') : '--';
+  $('#r-filename').textContent = filename || '--';
+  $('#r-summary').textContent = summary || '--';
   $('#r-date').textContent = date || '--';
   $('#r-path').textContent = 'Saved to: ' + path;
   $('#r-path').style.display = '';
@@ -711,17 +718,29 @@ function showClassifyModal(data) {
   $('#classify-img').src = 'data:image/jpeg;base64,' + data.preview;
   $('#classify-summary').innerHTML = '<strong>' + (data.summary || '') + '</strong><br>Date: ' + (data.date || 'Unknown');
   $('#classify-fn').value = data.filename || '';
-  selectedCategories = new Set([data.category]);
+  selectedTags = new Set(data.suggested_categories || [data.category]);
+
+  // Pre-fill folder with AI's primary category
+  $('#classify-folder').value = data.category || 'other';
+
+  // Populate folder suggestions from all categories
+  const dl = $('#folder-suggestions');
+  dl.innerHTML = '';
+  (data.all_categories || []).forEach(cat => {
+    const opt = document.createElement('option');
+    opt.value = cat;
+    dl.appendChild(opt);
+  });
 
   const suggestedEl = $('#suggested-tags');
   suggestedEl.innerHTML = '';
   (data.suggested_categories || []).forEach(cat => {
     const btn = document.createElement('button');
-    const sel = selectedCategories.has(cat);
+    const sel = selectedTags.has(cat);
     btn.className = 'tag-btn suggested' + (sel ? ' selected' : '');
     btn.textContent = cat;
     btn.setAttribute('aria-pressed', sel);
-    btn.onclick = () => toggleCategory(cat);
+    btn.onclick = () => toggleTag(cat);
     suggestedEl.appendChild(btn);
   });
 
@@ -730,59 +749,52 @@ function showClassifyModal(data) {
   allEl.innerHTML = '';
   (data.all_categories || []).filter(c => !suggested.has(c)).forEach(cat => {
     const btn = document.createElement('button');
-    btn.className = 'tag-btn';
+    const sel = selectedTags.has(cat);
+    btn.className = 'tag-btn' + (sel ? ' selected' : '');
     btn.textContent = cat;
-    btn.setAttribute('aria-pressed', 'false');
-    btn.onclick = () => toggleCategory(cat);
+    btn.setAttribute('aria-pressed', sel);
+    btn.onclick = () => toggleTag(cat);
     allEl.appendChild(btn);
   });
 
   pendingRisk = {level: data.risk_level, risks: data.risks};
   renderRisk($('#classify-risk'), data.risk_level, data.risks);
-  updateSelectedCount();
+  updateTagCount();
   $('#classify-modal').classList.add('active');
 }
 
-function toggleCategory(cat) {
-  if (selectedCategories.has(cat)) {
-    selectedCategories.delete(cat);
+function toggleTag(tag) {
+  if (selectedTags.has(tag)) {
+    selectedTags.delete(tag);
   } else {
-    selectedCategories.add(cat);
+    selectedTags.add(tag);
   }
   document.querySelectorAll('.tag-btn').forEach(btn => {
-    const on = selectedCategories.has(btn.textContent);
+    const on = selectedTags.has(btn.textContent);
     btn.classList.toggle('selected', on);
     btn.setAttribute('aria-pressed', on);
   });
-  // Update filename with the first selected category
-  if (selectedCategories.size > 0) {
-    const first = [...selectedCategories][0];
-    const fn = $('#classify-fn').value;
-    const parts = fn.split('_');
-    if (parts.length >= 3) { parts[1] = first; $('#classify-fn').value = parts.join('_'); }
-  }
-  updateSelectedCount();
+  updateTagCount();
 }
 
-function updateSelectedCount() {
-  const n = selectedCategories.size;
-  const label = n === 0 ? 'Save' : n === 1 ? 'Save (1 category)' : 'Save (' + n + ' categories)';
+function updateTagCount() {
+  const n = selectedTags.size;
+  const label = n === 0 ? 'Save' : n === 1 ? 'Save (1 tag)' : 'Save (' + n + ' tags)';
   $('#btn-save-classify').textContent = label;
 }
 
 function cancelClassify() { $('#classify-modal').classList.remove('active'); }
 
 async function saveClassified() {
-  if (selectedCategories.size === 0) { alert('Please select at least one category.'); return; }
+  const folder = $('#classify-folder').value.trim();
+  if (!folder) { alert('Please enter a folder name.'); $('#classify-folder').focus(); return; }
   $('#btn-save-classify').disabled = true;
   try {
-    const res = await fetch('/api/save-classified', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ categories: [...selectedCategories], filename: $('#classify-fn').value, output_dir: $('#output-dir').value }) });
+    const res = await fetch('/api/save-classified', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ folder, tags: [...selectedTags], filename: $('#classify-fn').value, output_dir: $('#output-dir').value }) });
     const data = await res.json();
     if (data.ok) {
       $('#classify-modal').classList.remove('active');
-      const cats = data.categories.join(', ');
-      const paths = data.output_paths.join('\n');
-      showResult(cats, $('#classify-fn').value, '', '--', paths, pendingRisk.level, pendingRisk.risks);
+      showResult({folder: data.folder, tags: data.tags, filename: $('#classify-fn').value, path: data.output_path, riskLevel: pendingRisk.level, risks: pendingRisk.risks});
     } else alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   $('#btn-save-classify').disabled = false;

@@ -9,6 +9,7 @@ dependencies = [
     "anthropic",
     "Pillow",
     "img2pdf",
+    "pikepdf",
     "python-dotenv",
     "flask",
 ]
