@@ -735,6 +735,7 @@ def api_save_batch():
             results.append({
                 "ok": True, "output_path": str(output_path),
                 "folder": folder, "tags": tags, "filename": doc_info.filename,
+                "summary": doc_info.summary,
             })
 
         with _state_lock:
@@ -1985,13 +1986,29 @@ function showBatchResults(docs) {
   $('#batch-results-title').textContent = 'Batch Complete \u2014 ' + docs.length + ' Document' + (docs.length !== 1 ? 's' : '');
   const list = $('#batch-results-list');
   list.innerHTML = '';
-  const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
   docs.forEach(doc => {
     const li = document.createElement('li');
     const name = doc.filename || (doc.output_path || '').split(/[/\\]/).pop() || 'document';
     const detail = [doc.folder || doc.category, doc.summary].filter(Boolean).join(' \u2014 ');
     const path = doc.output_path || '';
-    li.innerHTML = '<a class="br-name br-link" href="#" title="Reveal in file manager" onclick="revealFile(\'' + esc(path).replace(/'/g, "\\'") + '\'); return false;">' + esc(name) + ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;opacity:.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>' + (detail ? '<br><span class="br-detail">' + esc(detail) + '</span>' : '');
+
+    const link = document.createElement('a');
+    link.className = 'br-name br-link';
+    link.href = '#';
+    link.title = 'Reveal in file manager';
+    link.textContent = name + ' ';
+    link.insertAdjacentHTML('beforeend', '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;opacity:.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>');
+    link.addEventListener('click', e => { e.preventDefault(); if (path) revealFile(path); });
+    li.appendChild(link);
+
+    if (detail) {
+      const br = document.createElement('br');
+      const span = document.createElement('span');
+      span.className = 'br-detail';
+      span.textContent = detail;
+      li.appendChild(br);
+      li.appendChild(span);
+    }
     list.appendChild(li);
   });
 }
