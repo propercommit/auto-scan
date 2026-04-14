@@ -22,7 +22,7 @@ from auto_scan.config import Config, load_config
 from auto_scan.dedup import image_hash
 from auto_scan.history import find_by_hash, record_scan, search_history
 from auto_scan.organizer import sanitize_name, save_document, save_unclassified
-from auto_scan.usage import check_budget, get_usage
+from auto_scan.usage import get_usage
 from auto_scan.scanner.discovery import ScannerInfo, discover_all_scanners, discover_scanner, scanner_info_from_ip
 from auto_scan.scanner.escl import ESCLClient, ScanSettings
 
@@ -40,7 +40,7 @@ SETTINGS_DEFAULTS = {
     "color_mode": "RGB24",
     "scan_source": "Feeder",
     "mode": "auto",
-    "max_tokens": "0",
+    "daily_budget": "0",
 }
 
 
@@ -420,13 +420,13 @@ def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: li
 def _run_scan_job(data: dict, mode: str):
     """Run a scan job in a background thread. Updates state['job']."""
     try:
-        # Check token budget before starting
-        max_tokens = int(_load_settings().get("max_tokens", 0))
-        if max_tokens > 0:
-            within_budget, usage = check_budget(max_tokens)
-            if not within_budget:
+        # Check dollar budget before starting
+        daily_budget = float(_load_settings().get("daily_budget", 0))
+        if daily_budget > 0:
+            usage = get_usage()
+            if usage["estimated_cost"] >= daily_budget:
                 raise AutoScanError(
-                    f"Daily token budget exceeded: {usage['total_tokens']:,} / {max_tokens:,} tokens used. "
+                    f"Daily budget exceeded: ${usage['estimated_cost']:.2f} / ${daily_budget:.2f} spent. "
                     f"Increase the limit in Settings or wait until tomorrow."
                 )
 
@@ -1189,12 +1189,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
     </div>
     <div style="margin-top:10px">
-      <label for="max-tokens">Daily Token Budget (0 = unlimited)</label>
+      <label for="daily-budget">Daily Budget $ (0 = unlimited)</label>
       <div style="display:flex;gap:8px;align-items:center">
-        <input type="text" id="max-tokens" placeholder="0" onchange="saveSettings()" style="flex:1">
-        <button class="btn btn-secondary" style="width:auto;padding:8px 14px;font-size:13px;white-space:nowrap" onclick="crazyMode()">Crazy Mode</button>
+        <input type="text" id="daily-budget" placeholder="0.00" onchange="saveSettings()" style="flex:1">
+        <button class="btn btn-secondary" style="width:auto;padding:8px 14px;font-size:13px;white-space:nowrap" onclick="crazyMode()">Unlimited</button>
       </div>
-      <div class="field-hint">Blocks API calls when the daily limit is reached. Resets at midnight.</div>
+      <div class="field-hint">Blocks API calls when estimated daily spend reaches this amount. Resets at midnight.</div>
     </div>
   </div>
 
@@ -1343,7 +1343,7 @@ let pendingRisk = {level: null, risks: []};
       if (radio) radio.checked = true;
     }
     if (s.mode) setMode(s.mode);
-    if (s.max_tokens && s.max_tokens !== '0') $('#max-tokens').value = s.max_tokens;
+    if (s.daily_budget && s.daily_budget !== '0') $('#daily-budget').value = s.daily_budget;
   } catch(e) {}
   // Fallback handled by /api/settings defaults
   try {
@@ -1368,14 +1368,14 @@ function saveSettings() {
     color_mode: $('#color').value,
     scan_source: document.querySelector('input[name="source"]:checked').value,
     mode: currentMode,
-    max_tokens: $('#max-tokens').value.trim() || '0',
+    daily_budget: $('#daily-budget').value.trim() || '0',
   };
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings) }).catch(() => {});
 }
 
 function crazyMode() {
-  if (!confirm('Remove all token limits? API costs will be uncapped.')) return;
-  $('#max-tokens').value = '0';
+  if (!confirm('Remove daily budget limit? API costs will be uncapped.')) return;
+  $('#daily-budget').value = '0';
   saveSettings();
   refreshUsage();
 }
@@ -1926,7 +1926,7 @@ async function refreshUsage() {
   try {
     const res = await fetch('/api/usage');
     const u = await res.json();
-    const maxTok = parseInt($('#max-tokens').value) || 0;
+    const maxBudget = parseFloat($('#daily-budget').value) || 0;
     const dash = $('#usage-dash');
 
     // Hero values
@@ -1942,17 +1942,18 @@ async function refreshUsage() {
     const budgetSection = $('#usage-budget-section');
     const budgetVal = $('#usage-budget-val');
     const budgetDetail = $('#usage-budget-detail');
-    if (maxTok > 0) {
-      const pct = Math.min(100, (u.total_tokens / maxTok) * 100);
+    if (maxBudget > 0) {
+      const spent = u.estimated_cost || 0;
+      const pct = Math.min(100, (spent / maxBudget) * 100);
       budgetVal.textContent = Math.round(pct) + '%';
-      budgetDetail.textContent = pct >= 100 ? 'exceeded!' : fmtNum(maxTok - u.total_tokens) + ' remaining';
+      budgetDetail.textContent = pct >= 100 ? 'exceeded!' : '$' + (maxBudget - spent).toFixed(2) + ' remaining';
       budgetSection.classList.remove('hidden');
       budgetSection.setAttribute('aria-valuenow', Math.round(pct));
       const fill = $('#usage-budget-fill');
       fill.style.width = pct + '%';
       fill.className = 'usage-budget-fill' + (pct >= 100 ? ' over' : pct >= 90 ? ' critical' : pct >= 75 ? ' warn' : '');
       dash.classList.toggle('over-budget', pct >= 100);
-      $('#usage-budget-left').textContent = fmtNum(u.total_tokens) + ' of ' + fmtNum(maxTok) + ' tokens';
+      $('#usage-budget-left').textContent = '$' + spent.toFixed(2) + ' of $' + maxBudget.toFixed(2);
       const right = $('#usage-budget-right');
       right.innerHTML = pct >= 100 ? '<span class="over">Budget exceeded</span>' : Math.round(pct) + '% used';
     } else {
@@ -2046,14 +2047,17 @@ function showBatchModal(result) {
   openModal('#batch-modal');
 }
 
-function renderBatchDocs() {
-  // Preserve user-edited filenames and folders before re-rendering
-  const savedFn = {}, savedFolder = {};
-  batchData.forEach((_, i) => {
+function syncBatchEdits() {
+  // Sync any user-edited filenames/folders back into batchData before re-rendering
+  batchData.forEach((doc, i) => {
     const fnEl = $('#batch-fn-' + i), folderEl = $('#batch-folder-' + i);
-    if (fnEl) savedFn[i] = fnEl.value;
-    if (folderEl) savedFolder[i] = folderEl.value;
+    if (fnEl) doc.filename = fnEl.value;
+    if (folderEl) doc.category = folderEl.value;
   });
+}
+
+function renderBatchDocs() {
+  syncBatchEdits();
 
   const docsWithPages = batchPages.filter(p => p.length > 0).length;
   $('#batch-count').textContent = docsWithPages;
@@ -2107,8 +2111,8 @@ function renderBatchDocs() {
       riskHtml = '<div class="risk-alert risk-' + esc(doc.risk_level) + '" style="margin-top:8px"><h4>' + (icons[doc.risk_level]||'') + ' ' + esc(labels[doc.risk_level]||doc.risk_level) + '</h4><ul>' + doc.risks.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul></div>';
     }
 
-    const fn = i in savedFn ? savedFn[i] : (doc.filename || '');
-    const folder = i in savedFolder ? savedFolder[i] : (doc.category || 'other');
+    const fn = doc.filename || '';
+    const folder = doc.category || 'other';
 
     card.innerHTML =
       '<div class="batch-doc-head">' +
@@ -2265,14 +2269,15 @@ async function saveBatch() {
   const btn = $('#btn-save-batch');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-inline"></span>Saving...';
+  syncBatchEdits();
   const documents = [];
   batchData.forEach((doc, i) => {
     if (!batchPages[i] || batchPages[i].length === 0) return;
     documents.push({
       pages: batchPages[i],
-      folder: ($('#batch-folder-' + i) || {}).value || doc.category || 'other',
+      folder: doc.category || 'other',
       tags: [...(batchTags[i] || [])],
-      filename: ($('#batch-fn-' + i) || {}).value || doc.filename,
+      filename: doc.filename,
       summary: doc.summary || '',
       date: doc.date || null,
     });
