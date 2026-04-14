@@ -366,88 +366,99 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Auto-Scan</title>
 <style>
-  :root { --bg: #f8f9fa; --card: #fff; --border: #dee2e6; --primary: #0d6efd; --primary-hover: #0b5ed7; --gray: #6c757d; --green: #198754; --red: #dc3545; --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; --mono: "SF Mono", Menlo, Monaco, monospace; }
+  :root { --bg: #f8f9fa; --card: #fff; --border: #dee2e6; --primary: #0858cf; --primary-hover: #064bb3; --primary-light: #dbe8fc; --primary-text: #063b87; --gray: #495057; --gray-light: #5f6b75; --green: #146c43; --green-bg: #d1e7dd; --red: #b02a37; --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; --mono: "SF Mono", Menlo, Monaco, monospace; --focus-ring: 0 0 0 3px rgba(8,88,207,.4); }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: var(--font); background: var(--bg); color: #212529; line-height: 1.5; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
   .container { max-width: 740px; margin: 0 auto; padding: 24px 16px; }
   h1 { font-size: 24px; font-weight: 700; margin-bottom: 20px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
   .card h2 { font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gray); margin-bottom: 12px; }
-  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: #495057; }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: var(--gray); }
   input[type="text"], select { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; font-family: var(--font); }
-  input:focus, select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(13,110,253,.15); }
+  input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); box-shadow: var(--focus-ring); }
   .row { display: flex; gap: 12px; margin-bottom: 10px; }
   .row > * { flex: 1; }
   .radio-group { display: flex; gap: 16px; padding: 6px 0; }
   .radio-group label { display: flex; align-items: center; gap: 6px; font-weight: 400; cursor: pointer; }
+  .radio-group input[type="radio"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .btn-row { display: flex; gap: 10px; }
   .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; font-family: var(--font); cursor: pointer; transition: background .15s; width: 100%; }
-  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; box-shadow: var(--focus-ring); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
   .btn-primary { background: var(--primary); color: #fff; }
   .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
-  .btn-secondary { background: #e9ecef; color: #495057; }
+  .btn-secondary { background: #e9ecef; color: var(--gray); }
   .btn-secondary:hover:not(:disabled) { background: #dee2e6; }
   .btn-connect { padding: 8px 16px; width: auto; font-size: 14px; }
   .connect-row { display: flex; gap: 8px; align-items: flex-end; }
   .connect-row > :first-child { flex: 1; }
   .status { font-size: 13px; padding: 6px 0; }
   .status.connected { color: var(--green); font-weight: 600; }
-  .status.disconnected { color: var(--gray); }
-  .status.error { color: var(--red); }
+  .status.disconnected { color: var(--gray-light); }
+  .status.error { color: var(--red); font-weight: 600; }
   .results-grid { display: grid; grid-template-columns: 100px 1fr; gap: 4px 12px; font-size: 14px; }
-  .results-grid dt { font-weight: 600; color: #495057; }
+  .results-grid dt { font-weight: 600; color: var(--gray); }
   .results-grid dd { color: #212529; word-break: break-word; }
-  .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px; height: 160px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .log { background: #1a1a2e; color: #e0e0e0; border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px; height: 160px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .spinner { display: none; width: 18px; height: 18px; border: 2px solid #fff4; border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; margin-right: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .busy .spinner { display: inline-block; }
-  .output-path { margin-top: 10px; padding: 8px 12px; background: #d1e7dd; border-radius: 6px; font-size: 13px; word-break: break-all; }
+  .output-path { margin-top: 10px; padding: 8px 12px; background: var(--green-bg); color: #0a3622; border-radius: 6px; font-size: 13px; word-break: break-all; }
   .mode-toggle { display: flex; background: #e9ecef; border-radius: 8px; padding: 3px; margin-bottom: 12px; }
-  .mode-toggle button { flex: 1; padding: 8px 16px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; background: transparent; color: var(--gray); transition: all .15s; }
+  .mode-toggle button { flex: 1; padding: 8px 16px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; background: transparent; color: var(--gray-light); transition: all .15s; }
+  .mode-toggle button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
   .mode-toggle button.active { background: #fff; color: #212529; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
-  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; }
   .modal-overlay.active { display: flex; }
   .modal { background: #fff; border-radius: 14px; padding: 28px; max-width: 90vw; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
   .modal-sm { width: 480px; }
   .modal h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; color: #212529; text-transform: none; letter-spacing: 0; }
   .modal p { font-size: 14px; color: var(--gray); margin-bottom: 16px; line-height: 1.6; }
-  .modal a { color: var(--primary); }
+  .modal a { color: var(--primary); text-decoration: underline; }
+  .modal a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .modal input[type="password"] { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; font-family: var(--mono); margin-bottom: 6px; }
-  .modal input[type="password"]:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(13,110,253,.15); }
+  .modal input[type="password"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); box-shadow: var(--focus-ring); }
   .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   .modal-btns .btn { width: auto; }
-  .modal-error { color: var(--red); font-size: 13px; min-height: 20px; }
-  .classify-modal { width: 860px; }
+  .modal-error { color: var(--red); font-size: 13px; font-weight: 600; min-height: 20px; }
+  .classify-modal { width: 860px; max-height: 90vh; overflow-y: auto; }
   .classify-layout { display: flex; gap: 24px; }
   .classify-preview { flex: 0 0 340px; }
   .classify-preview img { width: 100%; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.08); }
   .classify-details { flex: 1; min-width: 0; }
-  .classify-summary { font-size: 14px; color: #495057; margin-bottom: 16px; padding: 12px; background: var(--bg); border-radius: 8px; }
+  .classify-summary { font-size: 14px; color: var(--gray); margin-bottom: 16px; padding: 12px; background: var(--bg); border-radius: 8px; }
   .classify-summary strong { color: #212529; }
   .tag-section { margin-bottom: 14px; }
   .tag-section h3 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gray); margin-bottom: 8px; }
   .tag-grid { display: flex; flex-wrap: wrap; gap: 6px; }
-  .tag-btn { padding: 8px 16px; border: 2px solid var(--border); border-radius: 8px; background: #fff; font-size: 14px; font-weight: 500; font-family: var(--font); cursor: pointer; transition: all .15s; text-transform: capitalize; }
-  .tag-btn:hover { border-color: var(--primary); color: var(--primary); background: #e7f1ff; }
-  .tag-btn.selected { border-color: var(--primary); background: var(--primary); color: #fff; }
-  .tag-btn.suggested { border-color: #b6d4fe; background: #e7f1ff; }
+  .tag-btn { padding: 8px 16px; border: 2px solid var(--border); border-radius: 8px; background: #fff; color: #212529; font-size: 14px; font-weight: 500; font-family: var(--font); cursor: pointer; transition: all .15s; text-transform: capitalize; }
+  .tag-btn:hover { border-color: var(--primary); color: var(--primary-text); background: var(--primary-light); }
+  .tag-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .tag-btn.selected { border-color: var(--primary); background: var(--primary-light); color: var(--primary-text); font-weight: 700; }
+  .tag-btn.suggested { border-color: #9dc2f7; background: #edf3fc; color: var(--primary-text); }
   .classify-filename { margin-top: 14px; }
   .classify-filename input[type="text"] { font-family: var(--mono); font-size: 13px; }
   .browse-row { display: flex; gap: 6px; align-items: center; }
   .browse-row input { flex: 1; }
   .btn-browse { flex-shrink: 0; width: 40px; height: 38px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #fff; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, border-color .15s; }
   .btn-browse:hover { background: #e9ecef; border-color: var(--primary); }
+  .btn-browse:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .risk-alert { margin-top: 12px; padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.6; }
   .risk-alert.risk-none { display: none; }
-  .risk-alert.risk-low { background: #fff3cd; border: 1px solid #ffc107; color: #664d03; }
-  .risk-alert.risk-medium { background: #ffe0cc; border: 1px solid #fd7e14; color: #803300; }
-  .risk-alert.risk-high { background: #f8d7da; border: 1px solid var(--red); color: #842029; }
+  .risk-alert.risk-low { background: #fff3cd; border: 1px solid #cc9a06; color: #664d03; }
+  .risk-alert.risk-medium { background: #ffe0cc; border: 1px solid #c35a02; color: #653000; }
+  .risk-alert.risk-high { background: #f8d7da; border: 1px solid var(--red); color: #6a1a21; }
   .risk-alert h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
   .risk-alert ul { margin: 4px 0 0 16px; padding: 0; }
   .risk-alert li { margin-bottom: 2px; }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } * { transition: none !important; } }
+  @media (max-width: 640px) { .classify-layout { flex-direction: column; } .classify-preview { flex: none; } .classify-modal { width: 95vw; } }
 </style>
 </head>
 <body>
+<a href="#main-content" class="sr-only">Skip to main content</a>
+<main id="main-content">
 <div class="container">
   <h1>Auto-Scan</h1>
 
@@ -460,7 +471,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
       <button class="btn btn-primary btn-connect" onclick="connect()">Connect</button>
     </div>
-    <div class="status disconnected" id="scanner-status">Not connected</div>
+    <div class="status disconnected" id="scanner-status" role="status" aria-live="polite">Not connected</div>
   </div>
 
   <div class="card">
@@ -482,24 +493,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <label for="output-dir">Output Directory</label>
       <div class="browse-row">
         <input type="text" id="output-dir" value="">
-        <button class="btn-browse" onclick="browseFolder()" title="Browse...">&#128193;</button>
+        <button class="btn-browse" onclick="browseFolder()" title="Browse folders" aria-label="Browse folders">&#128193;</button>
       </div>
     </div>
   </div>
 
   <div class="card">
-    <div class="mode-toggle">
-      <button class="active" id="mode-auto" onclick="setMode('auto')">Automatic</button>
-      <button id="mode-assisted" onclick="setMode('assisted')">Assisted</button>
+    <div class="mode-toggle" role="tablist" aria-label="Scan mode">
+      <button class="active" id="mode-auto" role="tab" aria-selected="true" onclick="setMode('auto')">Automatic</button>
+      <button id="mode-assisted" role="tab" aria-selected="false" onclick="setMode('assisted')">Assisted</button>
     </div>
-    <p id="mode-desc" style="font-size:13px;color:var(--gray);margin-bottom:12px">AI automatically classifies and saves the document.</p>
+    <p id="mode-desc" style="font-size:13px;color:var(--gray);margin-bottom:12px" aria-live="polite">AI automatically classifies and saves the document.</p>
     <div class="btn-row">
-      <button class="btn btn-primary" id="btn-classify" onclick="doScan()" disabled><span class="spinner"></span>Scan &amp; Classify</button>
-      <button class="btn btn-secondary" id="btn-scan" onclick="scanOnly()" disabled><span class="spinner"></span>Scan Only</button>
+      <button class="btn btn-primary" id="btn-classify" onclick="doScan()" disabled><span class="spinner" aria-hidden="true"></span><span class="sr-only busy-text" hidden>Scanning...</span>Scan &amp; Classify</button>
+      <button class="btn btn-secondary" id="btn-scan" onclick="scanOnly()" disabled><span class="spinner" aria-hidden="true"></span><span class="sr-only busy-text" hidden>Scanning...</span>Scan Only</button>
     </div>
   </div>
 
-  <div class="card" id="results-card" style="display:none">
+  <div class="card" id="results-card" style="display:none" aria-live="polite">
     <h2>Classification Results</h2>
     <dl class="results-grid">
       <dt>Category</dt><dd id="r-category">--</dd>
@@ -513,14 +524,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   <div class="card">
     <h2>Activity Log</h2>
-    <div class="log" id="log"></div>
+    <div class="log" id="log" role="log" aria-live="polite" aria-label="Activity log"></div>
   </div>
 </div>
 
+</main>
+
 <!-- API Key Modal -->
-<div class="modal-overlay" id="api-key-modal">
+<div class="modal-overlay" id="api-key-modal" role="dialog" aria-modal="true" aria-labelledby="api-key-title">
   <div class="modal modal-sm">
-    <h2>Anthropic API Key Required</h2>
+    <h2 id="api-key-title">Anthropic API Key Required</h2>
     <p>An API key is needed for AI document classification.<br>Get one at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a></p>
     <label for="api-key-input">API Key</label>
     <input type="password" id="api-key-input" placeholder="sk-ant-...">
@@ -533,9 +546,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <!-- Classification Modal -->
-<div class="modal-overlay" id="classify-modal">
+<div class="modal-overlay" id="classify-modal" role="dialog" aria-modal="true" aria-labelledby="classify-title">
   <div class="modal classify-modal">
-    <h2>Classify Document</h2>
+    <h2 id="classify-title">Classify Document</h2>
     <div class="classify-layout">
       <div class="classify-preview">
         <img id="classify-img" src="" alt="Document preview">
@@ -543,12 +556,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="classify-details">
         <div class="classify-summary" id="classify-summary"></div>
         <div class="tag-section">
-          <h3>Suggested</h3>
-          <div class="tag-grid" id="suggested-tags"></div>
+          <h3 id="suggested-label">Suggested</h3>
+          <div class="tag-grid" id="suggested-tags" role="group" aria-labelledby="suggested-label"></div>
         </div>
         <div class="tag-section">
-          <h3>All Categories</h3>
-          <div class="tag-grid" id="all-tags"></div>
+          <h3 id="all-cats-label">All Categories</h3>
+          <div class="tag-grid" id="all-tags" role="group" aria-labelledby="all-cats-label"></div>
         </div>
         <div class="risk-alert" id="classify-risk" style="display:none"></div>
         <div class="classify-filename">
@@ -584,6 +597,8 @@ function setMode(mode) {
   currentMode = mode;
   $('#mode-auto').classList.toggle('active', mode === 'auto');
   $('#mode-assisted').classList.toggle('active', mode === 'assisted');
+  $('#mode-auto').setAttribute('aria-selected', mode === 'auto');
+  $('#mode-assisted').setAttribute('aria-selected', mode === 'assisted');
   $('#mode-desc').textContent = mode === 'auto'
     ? 'AI automatically classifies and saves the document.'
     : 'Scan and review AI suggestions before saving.';
@@ -616,7 +631,10 @@ function getScanParams() {
 }
 function setBusy(busy) {
   $('#btn-classify').disabled = busy; $('#btn-scan').disabled = busy;
+  $('#btn-classify').setAttribute('aria-busy', busy);
+  $('#btn-scan').setAttribute('aria-busy', busy);
   ['#btn-classify','#btn-scan'].forEach(s => $(s).classList.toggle('busy', busy));
+  document.querySelectorAll('.busy-text').forEach(el => el.hidden = !busy);
 }
 
 async function connect() {
@@ -699,8 +717,10 @@ function showClassifyModal(data) {
   suggestedEl.innerHTML = '';
   (data.suggested_categories || []).forEach(cat => {
     const btn = document.createElement('button');
-    btn.className = 'tag-btn suggested' + (selectedCategories.has(cat) ? ' selected' : '');
+    const sel = selectedCategories.has(cat);
+    btn.className = 'tag-btn suggested' + (sel ? ' selected' : '');
     btn.textContent = cat;
+    btn.setAttribute('aria-pressed', sel);
     btn.onclick = () => toggleCategory(cat);
     suggestedEl.appendChild(btn);
   });
@@ -712,6 +732,7 @@ function showClassifyModal(data) {
     const btn = document.createElement('button');
     btn.className = 'tag-btn';
     btn.textContent = cat;
+    btn.setAttribute('aria-pressed', 'false');
     btn.onclick = () => toggleCategory(cat);
     allEl.appendChild(btn);
   });
@@ -728,7 +749,11 @@ function toggleCategory(cat) {
   } else {
     selectedCategories.add(cat);
   }
-  document.querySelectorAll('.tag-btn').forEach(btn => btn.classList.toggle('selected', selectedCategories.has(btn.textContent)));
+  document.querySelectorAll('.tag-btn').forEach(btn => {
+    const on = selectedCategories.has(btn.textContent);
+    btn.classList.toggle('selected', on);
+    btn.setAttribute('aria-pressed', on);
+  });
   // Update filename with the first selected category
   if (selectedCategories.size > 0) {
     const first = [...selectedCategories][0];
@@ -768,6 +793,26 @@ async function refreshLog() {
   try { const res = await fetch('/api/logs'); const logs = await res.json(); const el = $('#log'); el.textContent = logs.join('\n'); el.scrollTop = el.scrollHeight; } catch(e) {}
 }
 setInterval(refreshLog, 2000);
+
+// Keyboard: Escape closes modals
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if ($('#classify-modal').classList.contains('active')) { cancelClassify(); }
+    else if ($('#api-key-modal').classList.contains('active')) { closeApiModal(); }
+  }
+});
+
+// Focus trapping inside active modals
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  const overlay = document.querySelector('.modal-overlay.active');
+  if (!overlay) return;
+  const focusable = overlay.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])');
+  if (focusable.length === 0) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 </script>
 </body>
 </html>"""
