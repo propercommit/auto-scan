@@ -886,18 +886,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-results li:last-child { border-bottom: none; }
   .batch-results .br-name { font-weight: 600; }
   .batch-results .br-detail { font-size: 12px; color: var(--gray); }
-  .usage-bar { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; font-size: 13px; color: var(--gray); }
-  .usage-bar .usage-item { display: flex; align-items: center; gap: 4px; }
-  .usage-bar .usage-value { font-weight: 700; color: #212529; font-family: var(--mono); }
-  .usage-bar .usage-cost { font-weight: 700; color: var(--green); }
-  .usage-bar.over-budget { border-color: var(--red); background: #fff5f5; }
-  .usage-bar.over-budget .usage-value { color: var(--red); }
-  .usage-bar .usage-budget { margin-left: auto; font-size: 12px; color: var(--gray-light); }
-  .usage-bar .usage-budget .over { color: var(--red); font-weight: 700; }
-  .usage-progress { flex: 0 0 120px; height: 6px; background: #e9ecef; border-radius: 3px; overflow: hidden; }
-  .usage-progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .3s; }
-  .usage-progress-fill.warn { background: #cc9a06; }
-  .usage-progress-fill.over { background: var(--red); }
+  .usage-dash { background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; padding: 18px 20px 14px; }
+  .usage-dash.over-budget { border-color: var(--red); background: #fff5f5; }
+  .usage-dash-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--gray-light); margin-bottom: 12px; }
+  .usage-heroes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+  .usage-hero { text-align: center; }
+  .usage-hero-icon { width: 36px; height: 36px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 6px; }
+  .usage-hero-icon.tokens { background: var(--primary-light); color: var(--primary); }
+  .usage-hero-icon.cost { background: var(--green-bg); color: var(--green); }
+  .usage-hero-icon.calls { background: #e8daef; color: #7d3c98; }
+  .usage-hero-icon.budget { background: #fdebd0; color: #b9770e; }
+  .usage-hero-value { font-size: 20px; font-weight: 800; color: #212529; font-family: var(--mono); line-height: 1.1; }
+  .usage-hero-label { font-size: 11px; color: var(--gray-light); margin-top: 2px; }
+  .usage-dash.over-budget .usage-hero-value { color: var(--red); }
+  .usage-budget-bar { height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; margin-bottom: 4px; }
+  .usage-budget-fill { height: 100%; border-radius: 4px; transition: width .3s; background: var(--primary); }
+  .usage-budget-fill.warn { background: #cc9a06; }
+  .usage-budget-fill.over { background: var(--red); }
+  .usage-budget-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--gray-light); margin-bottom: 12px; }
+  .usage-budget-labels .over { color: var(--red); font-weight: 700; }
+  .usage-chart-wrap { position: relative; height: 80px; margin-top: 4px; }
+  .usage-chart { width: 100%; height: 100%; display: block; }
+  .usage-chart-empty { text-align: center; color: var(--gray-light); font-size: 12px; font-style: italic; padding-top: 28px; }
+  @media (max-width: 480px) { .usage-heroes { grid-template-columns: repeat(2, 1fr); } }
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } * { transition: none !important; } }
   @media (max-width: 640px) { .batch-modal { width: 95vw; } }
   @media (max-width: 640px) { .classify-layout { flex-direction: column; } .classify-preview { flex: none; } .classify-modal { width: 95vw; } }
@@ -909,12 +920,38 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="container">
   <h1>Auto-Scan</h1>
 
-  <div class="usage-bar" id="usage-bar">
-    <div class="usage-item">Tokens today: <span class="usage-value" id="usage-tokens">0</span></div>
-    <div class="usage-progress" id="usage-progress-wrap" style="display:none"><div class="usage-progress-fill" id="usage-progress"></div></div>
-    <div class="usage-item">Cost: <span class="usage-cost" id="usage-cost">$0.00</span></div>
-    <div class="usage-item">Calls: <span class="usage-value" id="usage-calls">0</span></div>
-    <div class="usage-budget" id="usage-budget-label"></div>
+  <div class="usage-dash" id="usage-dash">
+    <div class="usage-dash-title">Today's API Usage</div>
+    <div class="usage-heroes">
+      <div class="usage-hero">
+        <div class="usage-hero-icon tokens"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>
+        <div class="usage-hero-value" id="usage-tokens">0</div>
+        <div class="usage-hero-label">Tokens</div>
+      </div>
+      <div class="usage-hero">
+        <div class="usage-hero-icon cost"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg></div>
+        <div class="usage-hero-value" id="usage-cost">$0.00</div>
+        <div class="usage-hero-label">Est. Cost</div>
+      </div>
+      <div class="usage-hero">
+        <div class="usage-hero-icon calls"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+        <div class="usage-hero-value" id="usage-calls">0</div>
+        <div class="usage-hero-label">API Calls</div>
+      </div>
+      <div class="usage-hero">
+        <div class="usage-hero-icon budget"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>
+        <div class="usage-hero-value" id="usage-budget-val">--</div>
+        <div class="usage-hero-label">Budget</div>
+      </div>
+    </div>
+    <div id="usage-budget-section" style="display:none">
+      <div class="usage-budget-bar"><div class="usage-budget-fill" id="usage-budget-fill"></div></div>
+      <div class="usage-budget-labels"><span id="usage-budget-left"></span><span id="usage-budget-right"></span></div>
+    </div>
+    <div class="usage-chart-wrap" id="usage-chart-wrap">
+      <div class="usage-chart-empty" id="usage-chart-empty">No API calls yet today</div>
+      <canvas class="usage-chart" id="usage-chart" style="display:none"></canvas>
+    </div>
   </div>
 
   <div class="card">
@@ -1446,32 +1483,142 @@ async function refreshLog() {
 }
 setInterval(refreshLog, 2000);
 
+function drawUsageChart(history) {
+  const canvas = $('#usage-chart');
+  const empty = $('#usage-chart-empty');
+  if (!history || history.length === 0) {
+    canvas.style.display = 'none'; empty.style.display = '';
+    return;
+  }
+  canvas.style.display = ''; empty.style.display = 'none';
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const pad = {t: 8, r: 12, b: 20, l: 48};
+  const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const maxVal = Math.max(...history.map(h => h.cumulative)) * 1.15 || 1;
+  const pts = history.map((h, i) => ({
+    x: pad.l + (history.length === 1 ? cw : (i / (history.length - 1)) * cw),
+    y: pad.t + ch - (h.cumulative / maxVal) * ch,
+    ...h
+  }));
+
+  // Gradient fill
+  const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
+  grad.addColorStop(0, 'rgba(8,88,207,.18)');
+  grad.addColorStop(1, 'rgba(8,88,207,.02)');
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pad.t + ch);
+  pts.forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.lineTo(pts[pts.length-1].x, pad.t + ch);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+  ctx.strokeStyle = '#0858cf';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Dots
+  pts.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.strokeStyle = '#0858cf';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  });
+
+  // Y-axis labels
+  ctx.fillStyle = '#8b95a1';
+  ctx.font = '10px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const ySteps = [0, 0.5, 1];
+  ySteps.forEach(f => {
+    const y = pad.t + ch - f * ch;
+    const val = Math.round(f * maxVal);
+    ctx.fillText(val >= 1000 ? (val/1000).toFixed(0) + 'k' : val, pad.l - 6, y);
+    if (f > 0 && f < 1) {
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + cw, y);
+      ctx.strokeStyle = '#e9ecef'; ctx.lineWidth = 1; ctx.stroke();
+    }
+  });
+
+  // X-axis time labels
+  ctx.fillStyle = '#8b95a1';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const labelStep = Math.max(1, Math.floor(pts.length / 6));
+  pts.forEach((p, i) => {
+    if (i % labelStep === 0 || i === pts.length - 1) {
+      ctx.fillText(p.time, p.x, pad.t + ch + 5);
+    }
+  });
+
+  // Per-call bar indicators (input vs output)
+  const barW = Math.max(2, Math.min(12, cw / history.length - 2));
+  history.forEach((h, i) => {
+    const x = pts[i].x - barW / 2;
+    const inH = (h.input / maxVal) * ch * 0.3;
+    const outH = (h.output / maxVal) * ch * 0.3;
+    ctx.fillStyle = 'rgba(8,88,207,.35)';
+    ctx.fillRect(x, pad.t + ch - inH, barW * 0.5, inH);
+    ctx.fillStyle = 'rgba(20,108,67,.35)';
+    ctx.fillRect(x + barW * 0.5, pad.t + ch - outH, barW * 0.5, outH);
+  });
+}
+
 async function refreshUsage() {
   try {
     const res = await fetch('/api/usage');
     const u = await res.json();
     const maxTok = parseInt($('#max-tokens').value) || 0;
+    const dash = $('#usage-dash');
+
+    // Hero values
     $('#usage-tokens').textContent = u.total_tokens.toLocaleString();
     $('#usage-cost').textContent = '$' + u.estimated_cost.toFixed(4);
     $('#usage-calls').textContent = u.api_calls;
-    const bar = $('#usage-bar');
-    const progWrap = $('#usage-progress-wrap');
-    const prog = $('#usage-progress');
-    const budgetLabel = $('#usage-budget-label');
+
+    // Budget hero + bar
+    const budgetSection = $('#usage-budget-section');
+    const budgetVal = $('#usage-budget-val');
     if (maxTok > 0) {
-      progWrap.style.display = '';
       const pct = Math.min(100, (u.total_tokens / maxTok) * 100);
-      prog.style.width = pct + '%';
-      prog.className = 'usage-progress-fill' + (pct >= 100 ? ' over' : pct >= 75 ? ' warn' : '');
-      bar.classList.toggle('over-budget', pct >= 100);
-      budgetLabel.innerHTML = pct >= 100
-        ? '<span class="over">Budget exceeded</span> (' + maxTok.toLocaleString() + ')'
-        : 'Budget: ' + maxTok.toLocaleString();
+      budgetVal.textContent = Math.round(pct) + '%';
+      budgetSection.style.display = '';
+      const fill = $('#usage-budget-fill');
+      fill.style.width = pct + '%';
+      fill.className = 'usage-budget-fill' + (pct >= 100 ? ' over' : pct >= 75 ? ' warn' : '');
+      dash.classList.toggle('over-budget', pct >= 100);
+      $('#usage-budget-left').textContent = u.total_tokens.toLocaleString() + ' used';
+      const right = $('#usage-budget-right');
+      if (pct >= 100) {
+        right.innerHTML = '<span class="over">Exceeded!</span>';
+      } else {
+        right.textContent = (maxTok - u.total_tokens).toLocaleString() + ' remaining';
+      }
     } else {
-      progWrap.style.display = 'none';
-      bar.classList.remove('over-budget');
-      budgetLabel.textContent = '';
+      budgetVal.textContent = '--';
+      budgetSection.style.display = 'none';
+      dash.classList.remove('over-budget');
     }
+
+    // Chart
+    drawUsageChart(u.history || []);
   } catch(e) {}
 }
 setInterval(refreshUsage, 5000);

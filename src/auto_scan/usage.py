@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 _lock = threading.Lock()
@@ -39,6 +39,7 @@ def _load_usage() -> dict:
         "input_tokens": 0,
         "output_tokens": 0,
         "api_calls": 0,
+        "history": [],
     }
 
 
@@ -56,6 +57,14 @@ def record_usage(input_tokens: int, output_tokens: int) -> dict:
         usage["input_tokens"] += input_tokens
         usage["output_tokens"] += output_tokens
         usage["api_calls"] += 1
+        if "history" not in usage:
+            usage["history"] = []
+        usage["history"].append({
+            "time": datetime.now().strftime("%H:%M"),
+            "input": input_tokens,
+            "output": output_tokens,
+            "cumulative": usage["input_tokens"] + usage["output_tokens"],
+        })
         _save_usage(usage)
         return dict(usage)
 
@@ -69,10 +78,12 @@ def get_usage() -> dict:
         usage["input_tokens"] * COST_PER_INPUT_TOKEN
         + usage["output_tokens"] * COST_PER_OUTPUT_TOKEN
     )
+    history = usage.get("history", [])
     return {
         **usage,
         "total_tokens": total,
         "estimated_cost": round(cost, 4),
+        "history": history,
     }
 
 
@@ -94,7 +105,7 @@ def check_budget(max_tokens: int) -> tuple[bool, dict]:
 def check_rate_limit() -> None:
     """Enforce minimum interval between API calls.
 
-    Raises AnalysisError if called too soon after the last API call.
+    Raises RuntimeError if called too soon after the last API call.
     """
     global _last_api_call
     with _lock:
@@ -116,5 +127,6 @@ def reset_daily_usage() -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "api_calls": 0,
+            "history": [],
         }
         _save_usage(usage)
