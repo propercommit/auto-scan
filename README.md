@@ -6,10 +6,11 @@ Scan documents from a Canon GX7050 printer/scanner and automatically classify, n
 
 1. Discovers your Canon GX7050 on the local network (or connects via IP)
 2. Scans documents from the automatic document feeder (ADF) or flatbed
-3. Sends the scanned image to Claude Vision AI for analysis
-4. Classifies the document (invoice, receipt, contract, letter, medical, tax, etc.)
-5. Generates a descriptive filename based on the document content
-6. Saves the document as a PDF in a categorized folder
+3. Runs a local OCR privacy check to detect and redact sensitive data (SSN, IBAN, credit cards, etc.) before anything leaves your machine
+4. Sends the redacted image to Claude Vision AI for analysis
+5. Classifies the document (invoice, receipt, contract, letter, medical, tax, etc.)
+6. Generates a descriptive filename based on the document content
+7. Saves the original (unredacted) document as a PDF in a categorized folder
 
 ## Prerequisites
 
@@ -17,6 +18,7 @@ Scan documents from a Canon GX7050 printer/scanner and automatically classify, n
 - **Python 3.9 or newer**
 - **Canon GX7050** powered on and connected to the same Wi-Fi network as your computer
 - **Anthropic API key** — sign up at https://console.anthropic.com to get one
+- **Tesseract OCR** (optional, for sensitive data redaction) — `brew install tesseract`
 
 ## Installation
 
@@ -34,6 +36,7 @@ The installer will:
 - Check that Python 3.9+ is available
 - Create a virtual environment
 - Install all dependencies (including the GUI)
+- Install Tesseract OCR via Homebrew (for sensitive data redaction)
 - Help you set up your API key
 - Verify the installation
 
@@ -144,8 +147,51 @@ auto-scan-gui
 In the GUI:
 1. Click **Connect** (or enter the scanner IP first)
 2. Choose your settings (source, resolution, color)
-3. Click **Scan & Classify** to scan and auto-sort with AI
-4. Click **Scan Only** to save without classification
+3. Click **Scan & Classify** to scan and auto-sort with AI, or **Batch Scan** for multi-document ADF stacks
+4. Watch the pipeline timeline as it scans, checks for sensitive data, analyzes with AI, and saves
+5. Click **Scan Only** to save without classification
+
+## Privacy & Sensitive Data Redaction
+
+Auto-scan includes a local OCR privacy check that runs **before** any data is sent to the Claude API. It uses Tesseract OCR to detect text in scanned images and matches it against sensitive patterns:
+
+- **SSN** (US Social Security numbers)
+- **AHV/AVS** (Swiss social insurance numbers)
+- **Credit card numbers**
+- **IBAN** (international bank account numbers)
+- **Phone numbers**, **email addresses**, **dates of birth**, **passport numbers** (optional)
+
+When sensitive data is detected, the matching regions are blacked out in the image before it is sent to the AI. The original unredacted scan is preserved in the saved PDF.
+
+The pipeline timeline in the GUI shows the OCR step in real time: you can see what was found and confirm before anything is sent. Pages and documents that were redacted are marked with a blue "OCR protected" badge in the batch modal.
+
+### Settings
+
+- **Redact sensitive data** (enabled by default) — toggle in Settings to enable/disable
+- **Pattern selection** — choose which patterns to scan for
+- **Test OCR** button — verify tesseract is installed and working with a real test image
+- **Reckless mode** — skip the OCR preview and send directly to AI (redaction still runs if enabled)
+
+### Requirements
+
+Redaction requires Tesseract OCR installed on your system:
+
+```bash
+brew install tesseract
+```
+
+The installer (`./install.sh`) handles this automatically. If tesseract is not available, the privacy check step will be skipped and you'll see a warning.
+
+## Batch Scanning
+
+Batch mode scans a full stack from the ADF and uses AI to group pages into separate documents. In the review modal you can:
+
+- Drag and drop pages between documents
+- Move pages via a dropdown selector
+- Add or remove document groups
+- Edit filenames, folders, and tags per document
+- See AI confidence scores per page and per document
+- See which pages had sensitive data redacted (blue OCR badges)
 
 ## Usage Reference
 
@@ -154,6 +200,13 @@ In the GUI:
 ```bash
 auto-scan-gui
 ```
+
+The GUI shows a 4-step pipeline during scanning:
+
+1. **Scan** — pages coming in from the scanner
+2. **Privacy Check** — local OCR scanning for sensitive data, shows results and asks for confirmation
+3. **AI Analysis** — document classification with Claude Vision
+4. **Save** — writing files to disk
 
 ### CLI Commands
 
@@ -225,6 +278,12 @@ All settings can be configured in the `.env` file:
 | `SCAN_SOURCE` | `Feeder` | `Feeder` for ADF, `Platen` for flatbed |
 | `CLAUDE_MODEL` | `claude-sonnet-4-20250514` | Claude model to use for analysis |
 
+The GUI also has its own persistent settings (saved to `~/.auto_scan/settings.json`):
+
+- **Daily budget** — cap API spending per day (resets at midnight)
+- **Redaction toggle and patterns** — control sensitive data redaction
+- **Reckless mode** — skip the OCR confirmation step
+
 ## Troubleshooting
 
 **"Could not find a Canon scanner on the network"**
@@ -245,3 +304,12 @@ All settings can be configured in the `.env` file:
 **GUI doesn't open**
 - Make sure you installed with `pip install -e ".[gui]"`
 - On macOS, you may need to allow the terminal app access in System Preferences > Privacy & Security
+
+**"Redaction SKIPPED: tesseract is not installed"**
+- Install Tesseract OCR: `brew install tesseract`
+- Use the **Test OCR** button in Settings to verify it works
+
+**OCR privacy check is slow**
+- OCR processing time depends on page count and resolution. At 300 DPI, expect ~0.5-1s per page.
+- Lower the resolution to 200 DPI for faster OCR if quality is acceptable
+- Enable **Reckless mode** to skip the confirmation step (redaction still runs silently)
