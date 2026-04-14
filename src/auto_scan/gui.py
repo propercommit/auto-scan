@@ -22,6 +22,7 @@ from auto_scan.config import Config, load_config
 from auto_scan.dedup import image_hash
 from auto_scan.history import find_by_hash, record_scan, search_history
 from auto_scan.organizer import sanitize_name, save_document, save_unclassified
+from auto_scan.usage import check_budget, get_usage
 from auto_scan.scanner.discovery import ScannerInfo, discover_all_scanners, discover_scanner, scanner_info_from_ip
 from auto_scan.scanner.escl import ESCLClient, ScanSettings
 
@@ -39,6 +40,7 @@ SETTINGS_DEFAULTS = {
     "color_mode": "RGB24",
     "scan_source": "Feeder",
     "mode": "auto",
+    "max_tokens": "0",
 }
 
 
@@ -350,6 +352,16 @@ def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: li
 def _run_scan_job(data: dict, mode: str):
     """Run a scan job in a background thread. Updates state['job']."""
     try:
+        # Check token budget before starting
+        max_tokens = int(_load_settings().get("max_tokens", 0))
+        if max_tokens > 0:
+            within_budget, usage = check_budget(max_tokens)
+            if not within_budget:
+                raise AutoScanError(
+                    f"Daily token budget exceeded: {usage['total_tokens']:,} / {max_tokens:,} tokens used. "
+                    f"Increase the limit in Settings or wait until tomorrow."
+                )
+
         with _state_lock:
             state["job"] = {"status": "scanning"}
         images, config = _do_scan(data)
@@ -703,6 +715,12 @@ def api_history():
     return jsonify(results)
 
 
+@app.route("/api/usage")
+def api_usage():
+    """Return today's token usage and cost."""
+    return jsonify(get_usage())
+
+
 @app.route("/api/logs")
 def api_logs():
     with _state_lock:
@@ -860,6 +878,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-results li:last-child { border-bottom: none; }
   .batch-results .br-name { font-weight: 600; }
   .batch-results .br-detail { font-size: 12px; color: var(--gray); }
+  .usage-bar { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; font-size: 13px; color: var(--gray); }
+  .usage-bar .usage-item { display: flex; align-items: center; gap: 4px; }
+  .usage-bar .usage-value { font-weight: 700; color: #212529; font-family: var(--mono); }
+  .usage-bar .usage-cost { font-weight: 700; color: var(--green); }
+  .usage-bar.over-budget { border-color: var(--red); background: #fff5f5; }
+  .usage-bar.over-budget .usage-value { color: var(--red); }
+  .usage-bar .usage-budget { margin-left: auto; font-size: 12px; color: var(--gray-light); }
+  .usage-bar .usage-budget .over { color: var(--red); font-weight: 700; }
+  .usage-progress { flex: 0 0 120px; height: 6px; background: #e9ecef; border-radius: 3px; overflow: hidden; }
+  .usage-progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .3s; }
+  .usage-progress-fill.warn { background: #cc9a06; }
+  .usage-progress-fill.over { background: var(--red); }
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } * { transition: none !important; } }
   @media (max-width: 640px) { .batch-modal { width: 95vw; } }
   @media (max-width: 640px) { .classify-layout { flex-direction: column; } .classify-preview { flex: none; } .classify-modal { width: 95vw; } }
@@ -870,6 +900,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <main id="main-content">
 <div class="container">
   <h1>Auto-Scan</h1>
+
+  <div class="usage-bar" id="usage-bar">
+    <div class="usage-item">Tokens today: <span class="usage-value" id="usage-tokens">0</span></div>
+    <div class="usage-progress" id="usage-progress-wrap" style="display:none"><div class="usage-progress-fill" id="usage-progress"></div></div>
+    <div class="usage-item">Cost: <span class="usage-cost" id="usage-cost">$0.00</span></div>
+    <div class="usage-item">Calls: <span class="usage-value" id="usage-calls">0</span></div>
+    <div class="usage-budget" id="usage-budget-label"></div>
+  </div>
 
   <div class="card">
     <h2>Scanner</h2>
@@ -906,6 +944,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <input type="text" id="output-dir" value="">
         <button class="btn-browse" onclick="browseFolder()" title="Browse folders" aria-label="Browse folders">&#128193;</button>
       </div>
+    </div>
+    <div style="margin-top:10px">
+      <label for="max-tokens">Daily Token Budget (0 = unlimited)</label>
+      <input type="text" id="max-tokens" placeholder="0" onchange="saveSettings()">
+      <div class="field-hint">Blocks API calls when the daily limit is reached. Resets at midnight.</div>
     </div>
   </div>
 
@@ -1044,6 +1087,7 @@ let pendingRisk = {level: null, risks: []};
       if (radio) radio.checked = true;
     }
     if (s.mode) setMode(s.mode);
+    if (s.max_tokens && s.max_tokens !== '0') $('#max-tokens').value = s.max_tokens;
   } catch(e) {}
   // Fallback handled by /api/settings defaults
   try {
@@ -1052,6 +1096,7 @@ let pendingRisk = {level: null, risks: []};
     if (!data.has_api_key) { $('#api-key-modal').classList.add('active'); $('#api-key-input').focus(); }
   } catch(e) {}
   refreshLog();
+  refreshUsage();
 })();
 
 function saveSettings() {
@@ -1062,6 +1107,7 @@ function saveSettings() {
     color_mode: $('#color').value,
     scan_source: document.querySelector('input[name="source"]:checked').value,
     mode: currentMode,
+    max_tokens: $('#max-tokens').value.trim() || '0',
   };
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings) }).catch(() => {});
 }
@@ -1133,6 +1179,7 @@ function pollJob() {
         }
         clearInterval(interval);
         refreshLog();
+        refreshUsage();
         resolve(job);
       } catch(e) {
         clearInterval(interval);
@@ -1359,6 +1406,36 @@ async function refreshLog() {
   try { const res = await fetch('/api/logs'); const logs = await res.json(); const el = $('#log'); el.textContent = logs.join('\n'); el.scrollTop = el.scrollHeight; } catch(e) {}
 }
 setInterval(refreshLog, 2000);
+
+async function refreshUsage() {
+  try {
+    const res = await fetch('/api/usage');
+    const u = await res.json();
+    const maxTok = parseInt($('#max-tokens').value) || 0;
+    $('#usage-tokens').textContent = u.total_tokens.toLocaleString();
+    $('#usage-cost').textContent = '$' + u.estimated_cost.toFixed(4);
+    $('#usage-calls').textContent = u.api_calls;
+    const bar = $('#usage-bar');
+    const progWrap = $('#usage-progress-wrap');
+    const prog = $('#usage-progress');
+    const budgetLabel = $('#usage-budget-label');
+    if (maxTok > 0) {
+      progWrap.style.display = '';
+      const pct = Math.min(100, (u.total_tokens / maxTok) * 100);
+      prog.style.width = pct + '%';
+      prog.className = 'usage-progress-fill' + (pct >= 100 ? ' over' : pct >= 75 ? ' warn' : '');
+      bar.classList.toggle('over-budget', pct >= 100);
+      budgetLabel.innerHTML = pct >= 100
+        ? '<span class="over">Budget exceeded</span> (' + maxTok.toLocaleString() + ')'
+        : 'Budget: ' + maxTok.toLocaleString();
+    } else {
+      progWrap.style.display = 'none';
+      bar.classList.remove('over-budget');
+      budgetLabel.textContent = '';
+    }
+  } catch(e) {}
+}
+setInterval(refreshUsage, 5000);
 
 // ── Batch scan ──────────────────────────────────────────────────────
 let batchData = [];   // Array of doc objects from API

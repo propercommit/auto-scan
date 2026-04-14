@@ -14,6 +14,7 @@ from PIL import Image
 
 from auto_scan import AnalysisError
 from auto_scan.config import Config
+from auto_scan.usage import check_rate_limit, record_usage
 
 ALL_CATEGORIES = [
     "invoice", "receipt", "contract", "letter", "medical", "tax",
@@ -68,6 +69,7 @@ def _resize_for_api(image_data: bytes, max_dim: int = 1568) -> bytes:
 
 def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     """Send scanned page images to Claude Vision for classification and naming."""
+    check_rate_limit()
     print("Analyzing document with AI...", file=sys.stderr)
 
     client = anthropic.Anthropic(api_key=config.api_key, timeout=120.0)
@@ -108,6 +110,13 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
         raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
     except anthropic.APIError as e:
         raise AnalysisError(f"Claude API error: {e}") from e
+
+    # Record token usage
+    record_usage(message.usage.input_tokens, message.usage.output_tokens)
+    print(
+        f"  Tokens: {message.usage.input_tokens:,} in + {message.usage.output_tokens:,} out",
+        file=sys.stderr,
+    )
 
     # Parse the JSON response
     response_text = message.content[0].text.strip()
@@ -182,6 +191,7 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
     if len(images) > 50:
         raise AnalysisError("Batch scan supports up to 50 pages. Please scan fewer pages.")
 
+    check_rate_limit()
     print(f"Batch analyzing {len(images)} pages...", file=sys.stderr)
     client = anthropic.Anthropic(api_key=config.api_key, timeout=180.0)
 
@@ -214,6 +224,13 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
         raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
     except anthropic.APIError as e:
         raise AnalysisError(f"Claude API error: {e}") from e
+
+    # Record token usage
+    record_usage(message.usage.input_tokens, message.usage.output_tokens)
+    print(
+        f"  Tokens: {message.usage.input_tokens:,} in + {message.usage.output_tokens:,} out",
+        file=sys.stderr,
+    )
 
     response_text = message.content[0].text.strip()
     if response_text.startswith("```"):
