@@ -41,6 +41,7 @@ SETTINGS_DEFAULTS = {
     "scan_source": "Feeder",
     "mode": "auto",
     "daily_budget": "0",
+    "redact_enabled": True,
 }
 
 
@@ -423,8 +424,8 @@ def _run_scan_job(data: dict, mode: str):
         # Load settings
         settings = _load_settings()
         daily_budget = float(settings.get("daily_budget", 0))
-        redact = bool(settings.get("redact_enabled"))
         reckless = bool(settings.get("reckless_mode"))
+        redact = bool(settings.get("redact_enabled")) and not reckless
         redact_pats = set(settings.get("redact_patterns", "").split(",")) - {""} if redact else None
         if daily_budget > 0:
             usage = get_usage()
@@ -1323,7 +1324,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div style="margin-top:10px">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-        <input type="checkbox" id="reckless-toggle" onchange="saveSettings()" style="width:auto;accent-color:#EF4444">
+        <input type="checkbox" id="reckless-toggle" style="width:auto;accent-color:#EF4444">
         <span>Reckless mode <span style="font-size:12px;color:var(--gray)">(skip OCR privacy check, send directly to AI)</span></span>
       </label>
       <div class="field-hint">Skips the local OCR preview and confirmation step. Redaction still runs before sending to the API if enabled above.</div>
@@ -1482,7 +1483,7 @@ let pendingRisk = {level: null, risks: []};
       const pats = s.redact_patterns.split(',');
       document.querySelectorAll('#redact-patterns input[type="checkbox"]').forEach(cb => { cb.checked = pats.includes(cb.value); });
     }
-    if (s.reckless_mode) { $('#reckless-toggle').checked = true; }
+    if (s.reckless_mode) { $('#reckless-toggle').checked = true; updateRecklessState(true); }
   } catch(e) {}
   // Fallback handled by /api/settings defaults
   try {
@@ -1501,6 +1502,25 @@ let pendingRisk = {level: null, risks: []};
 
 $('#redact-toggle').addEventListener('change', function() {
   $('#redact-patterns').style.display = this.checked ? '' : 'none';
+});
+
+function updateRecklessState(reckless) {
+  const redactSection = $('#redact-toggle').closest('div').parentElement;
+  const toggle = $('#redact-toggle');
+  const patterns = $('#redact-patterns');
+  if (reckless) {
+    toggle.disabled = true;
+    redactSection.style.opacity = '0.4';
+    redactSection.style.pointerEvents = 'none';
+  } else {
+    toggle.disabled = false;
+    redactSection.style.opacity = '';
+    redactSection.style.pointerEvents = '';
+  }
+}
+$('#reckless-toggle').addEventListener('change', function() {
+  updateRecklessState(this.checked);
+  saveSettings();
 });
 
 function saveSettings() {
