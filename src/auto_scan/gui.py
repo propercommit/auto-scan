@@ -1,12 +1,13 @@
-"""GUI for auto-scan using tkinter + ttk."""
+"""Web-based GUI for auto-scan using Flask."""
 
 from __future__ import annotations
 
 import threading
-import tkinter as tk
+import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, ttk
+
+from flask import Flask, jsonify, render_template_string, request
 
 from auto_scan import AutoScanError
 from auto_scan.analyzer import DocumentInfo, analyze_document
@@ -15,336 +16,436 @@ from auto_scan.organizer import save_document, save_unclassified
 from auto_scan.scanner.discovery import ScannerInfo, discover_scanner, scanner_info_from_ip
 from auto_scan.scanner.escl import ESCLClient, ScanSettings
 
+app = Flask(__name__)
 
-class AutoScanApp:
-    def __init__(self) -> None:
-        self.root = tk.Tk()
-        self.root.title("Auto-Scan")
-        self.root.geometry("720x760")
-        self.root.minsize(600, 680)
+# ── App state ────────────────────────────────────────────────────────
 
-        # Use native macOS styling
-        style = ttk.Style()
-        style.theme_use("aqua")
-        style.configure("Header.TLabel", font=("Helvetica", 13, "bold"))
-        style.configure("Status.TLabel", foreground="gray")
-        style.configure("StatusOK.TLabel", foreground="green")
-        style.configure("Big.TButton", padding=(12, 8))
+state = {
+    "scanner_info": None,
+    "config": None,
+    "logs": [],
+}
 
-        self.scanner_info: ScannerInfo | None = None
-        self.scanned_images: list[bytes] = []
-        self.doc_info: DocumentInfo | None = None
-        self.config: Config | None = None
 
-        self._build_ui()
-        self._try_load_config()
+def _log(msg: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    state["logs"].append(f"[{ts}] {msg}")
+    # Keep last 200 entries
+    if len(state["logs"]) > 200:
+        state["logs"] = state["logs"][-200:]
 
-    # ── UI Construction ──────────────────────────────────────────────
 
-    def _build_ui(self) -> None:
-        self.root.columnconfigure(0, weight=1)
+def _get_config(**overrides) -> Config:
+    return load_config(**overrides)
 
-        pad = {"padx": 12, "pady": 4}
-        row = 0
 
-        # --- Scanner Connection ---
-        scanner_frame = ttk.LabelFrame(self.root, text="Scanner", padding=8)
-        scanner_frame.grid(row=row, column=0, padx=12, pady=(12, 4), sticky="ew")
-        scanner_frame.columnconfigure(1, weight=1)
+# ── Routes ───────────────────────────────────────────────────────────
 
-        self.scanner_status_label = ttk.Label(
-            scanner_frame, text="Not connected", style="Status.TLabel"
-        )
-        self.scanner_status_label.grid(row=0, column=0, columnspan=3, **pad, sticky="w")
+@app.route("/")
+def index():
+    return render_template_string(HTML_TEMPLATE)
 
-        ttk.Label(scanner_frame, text="IP:").grid(row=1, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.scanner_ip_var = tk.StringVar()
-        self.scanner_ip_entry = ttk.Entry(scanner_frame, textvariable=self.scanner_ip_var)
-        self.scanner_ip_entry.grid(row=1, column=1, padx=4, pady=4, sticky="ew")
-        self.scanner_ip_entry.insert(0, "")
 
-        self.connect_btn = ttk.Button(scanner_frame, text="Connect", command=self._on_connect)
-        self.connect_btn.grid(row=1, column=2, padx=(4, 12), pady=4)
+@app.route("/api/connect", methods=["POST"])
+def api_connect():
+    data = request.json or {}
+    ip = data.get("ip", "").strip()
 
-        ttk.Label(scanner_frame, text="Leave IP blank for auto-discover", foreground="gray").grid(
-            row=2, column=0, columnspan=3, padx=12, pady=(0, 4), sticky="w"
-        )
-
-        row += 1
-
-        # --- Scan Settings ---
-        settings_frame = ttk.LabelFrame(self.root, text="Settings", padding=8)
-        settings_frame.grid(row=row, column=0, padx=12, pady=4, sticky="ew")
-        settings_frame.columnconfigure(1, weight=1)
-
-        # Source
-        ttk.Label(settings_frame, text="Source:").grid(row=0, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.source_var = tk.StringVar(value="Feeder")
-        source_frame = ttk.Frame(settings_frame)
-        source_frame.grid(row=0, column=1, columnspan=3, padx=4, pady=4, sticky="w")
-        ttk.Radiobutton(source_frame, text="Document Feeder (ADF)", variable=self.source_var, value="Feeder").pack(side="left", padx=(0, 12))
-        ttk.Radiobutton(source_frame, text="Flatbed", variable=self.source_var, value="Platen").pack(side="left")
-
-        # Resolution
-        ttk.Label(settings_frame, text="Resolution:").grid(row=1, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.resolution_var = tk.StringVar(value="300")
-        res_combo = ttk.Combobox(
-            settings_frame, textvariable=self.resolution_var,
-            values=["150", "200", "300", "600"], state="readonly", width=8
-        )
-        res_combo.grid(row=1, column=1, padx=4, pady=4, sticky="w")
-        ttk.Label(settings_frame, text="DPI").grid(row=1, column=2, padx=0, pady=4, sticky="w")
-
-        # Color mode
-        ttk.Label(settings_frame, text="Color:").grid(row=2, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.color_var = tk.StringVar(value="Color")
-        color_frame = ttk.Frame(settings_frame)
-        color_frame.grid(row=2, column=1, columnspan=3, padx=4, pady=4, sticky="w")
-        ttk.Radiobutton(color_frame, text="Color", variable=self.color_var, value="Color").pack(side="left", padx=(0, 12))
-        ttk.Radiobutton(color_frame, text="Grayscale", variable=self.color_var, value="Grayscale").pack(side="left")
-
-        # Output directory
-        ttk.Label(settings_frame, text="Output:").grid(row=3, column=0, padx=(12, 4), pady=4, sticky="w")
-        self.output_dir_var = tk.StringVar(value=str(Path("~/Documents/Scans").expanduser()))
-        ttk.Entry(settings_frame, textvariable=self.output_dir_var).grid(
-            row=3, column=1, columnspan=2, padx=4, pady=4, sticky="ew"
-        )
-        ttk.Button(settings_frame, text="Browse", command=self._browse_output).grid(
-            row=3, column=3, padx=(4, 12), pady=4
-        )
-
-        row += 1
-
-        # --- Action Buttons ---
-        btn_frame = ttk.Frame(self.root)
-        btn_frame.grid(row=row, column=0, padx=12, pady=8, sticky="ew")
-        btn_frame.columnconfigure(0, weight=1)
-        btn_frame.columnconfigure(1, weight=1)
-
-        self.scan_btn = ttk.Button(
-            btn_frame, text="Scan & Classify", style="Big.TButton",
-            command=self._on_scan_classify, state="disabled"
-        )
-        self.scan_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
-
-        self.scan_only_btn = ttk.Button(
-            btn_frame, text="Scan Only", style="Big.TButton",
-            command=self._on_scan_only, state="disabled"
-        )
-        self.scan_only_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
-
-        row += 1
-
-        # --- Progress ---
-        self.progress_var = tk.IntVar(value=0)
-        self.progress_bar = ttk.Progressbar(self.root, variable=self.progress_var, maximum=100)
-        self.progress_bar.grid(row=row, column=0, padx=12, pady=(0, 4), sticky="ew")
-
-        row += 1
-
-        # --- Results ---
-        results_frame = ttk.LabelFrame(self.root, text="Classification Results", padding=8)
-        results_frame.grid(row=row, column=0, padx=12, pady=4, sticky="ew")
-        results_frame.columnconfigure(1, weight=1)
-
-        labels = ["Category:", "Filename:", "Summary:", "Date:"]
-        self.result_values: list[ttk.Label] = []
-        for i, label_text in enumerate(labels):
-            ttk.Label(results_frame, text=label_text, font=("Helvetica", 12, "bold")).grid(
-                row=i, column=0, padx=(12, 8), pady=3, sticky="nw"
-            )
-            val = ttk.Label(results_frame, text="--", wraplength=450, anchor="w", justify="left")
-            val.grid(row=i, column=1, padx=(0, 12), pady=3, sticky="w")
-            self.result_values.append(val)
-
-        row += 1
-
-        # --- Log ---
-        log_frame = ttk.LabelFrame(self.root, text="Activity Log", padding=8)
-        log_frame.grid(row=row, column=0, padx=12, pady=(4, 12), sticky="nsew")
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        self.root.rowconfigure(row, weight=1)
-
-        self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled",
-                                bg="#f5f5f5", font=("Menlo", 11), relief="sunken", bd=1)
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-    # ── Helpers ──────────────────────────────────────────────────────
-
-    def _log(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{timestamp}] {message}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
-
-    def _set_scanner_status(self, text: str, connected: bool) -> None:
-        style = "StatusOK.TLabel" if connected else "Status.TLabel"
-        self.scanner_status_label.configure(text=text, style=style)
-
-    def _set_busy(self, busy: bool) -> None:
-        state = "disabled" if busy else "!disabled"
-        self.scan_btn.state([state])
-        self.scan_only_btn.state([state])
-        self.connect_btn.state([state])
-        if busy:
-            self.progress_bar.configure(mode="indeterminate")
-            self.progress_bar.start(15)
-        else:
-            self.progress_bar.stop()
-            self.progress_bar.configure(mode="determinate")
-            self.progress_var.set(0)
-
-    def _clear_results(self) -> None:
-        for val in self.result_values:
-            val.configure(text="--")
-
-    def _show_results(self, info: DocumentInfo) -> None:
-        texts = [info.category, info.filename, info.summary, info.date or "--"]
-        for val, text in zip(self.result_values, texts):
-            val.configure(text=text)
-
-    def _browse_output(self) -> None:
-        path = filedialog.askdirectory(initialdir=self.output_dir_var.get())
-        if path:
-            self.output_dir_var.set(path)
-
-    def _try_load_config(self) -> None:
-        try:
-            self.config = load_config()
-            self._log("Config loaded from .env")
-            if self.config.scanner_ip:
-                self.scanner_ip_var.set(self.config.scanner_ip)
-        except RuntimeError:
-            self._log("No ANTHROPIC_API_KEY found. Set it in .env for AI classification.")
-
-    def _get_current_config(self) -> Config:
-        """Build a Config from current GUI state."""
-        color_map = {"Color": "RGB24", "Grayscale": "Grayscale8"}
-        overrides = {
-            "scan_source": self.source_var.get(),
-            "color_mode": color_map.get(self.color_var.get(), "RGB24"),
-            "resolution": int(self.resolution_var.get()),
-            "output_dir": self.output_dir_var.get(),
-        }
-        ip = self.scanner_ip_var.get().strip()
+    try:
         if ip:
-            overrides["scanner_ip"] = ip
-        return load_config(**overrides)
-
-    # ── Background task runner ───────────────────────────────────────
-
-    def _run_in_thread(self, target, *args) -> None:
-        def wrapper():
-            try:
-                target(*args)
-            except Exception as e:
-                self.root.after(0, lambda: self._on_task_error(e))
-            finally:
-                self.root.after(0, lambda: self._set_busy(False))
-
-        self._set_busy(True)
-        threading.Thread(target=wrapper, daemon=True).start()
-
-    def _on_task_error(self, error: Exception) -> None:
-        self._log(f"Error: {error}")
-
-    # ── Actions ──────────────────────────────────────────────────────
-
-    def _on_connect(self) -> None:
-        self._run_in_thread(self._connect_scanner)
-
-    def _connect_scanner(self) -> None:
-        ip = self.scanner_ip_var.get().strip()
-
-        if ip:
-            self.root.after(0, lambda: self._log(f"Connecting to {ip}..."))
+            _log(f"Connecting to {ip}...")
             info = scanner_info_from_ip(ip)
         else:
-            self.root.after(0, lambda: self._log("Searching for Canon scanner..."))
+            _log("Searching for Canon scanner...")
             info = discover_scanner(timeout=8.0)
 
-        # Test the connection
         client = ESCLClient(info.base_url)
         status = client.get_status()
         caps = client.get_capabilities()
         client.close()
 
-        self.scanner_info = info
+        state["scanner_info"] = info
+        _log(f"Connected: {info.name} at {info.ip}")
+        _log(f"  State: {status.state}, ADF: {status.adf_state or 'N/A'}")
 
-        def update_ui():
-            self._set_scanner_status(f"{info.name}  --  {status.state}", True)
-            self._log(f"Connected: {info.name} at {info.ip}")
-            self._log(f"  State: {status.state}, ADF: {status.adf_state or 'N/A'}")
-            self._log(f"  Sources: {caps.sources}, Resolutions: {caps.resolutions}")
-            self.scan_btn.state(["!disabled"])
-            self.scan_only_btn.state(["!disabled"])
+        return jsonify({
+            "ok": True,
+            "name": info.name,
+            "ip": info.ip,
+            "state": status.state,
+            "adf": status.adf_state,
+            "sources": caps.sources,
+            "resolutions": caps.resolutions,
+            "color_modes": caps.color_modes,
+        })
+    except Exception as e:
+        _log(f"Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-        self.root.after(0, update_ui)
 
-    def _on_scan_classify(self) -> None:
-        self._clear_results()
-        self._run_in_thread(self._do_scan, True)
+@app.route("/api/scan", methods=["POST"])
+def api_scan():
+    data = request.json or {}
+    classify = data.get("classify", True)
+    source = data.get("source", "Feeder")
+    resolution = int(data.get("resolution", 300))
+    color = data.get("color", "RGB24")
+    output_dir = data.get("output_dir", "")
 
-    def _on_scan_only(self) -> None:
-        self._clear_results()
-        self._run_in_thread(self._do_scan, False)
+    try:
+        overrides = {
+            "scan_source": source,
+            "resolution": resolution,
+            "color_mode": color,
+        }
+        if output_dir:
+            overrides["output_dir"] = output_dir
 
-    def _do_scan(self, classify: bool) -> None:
-        config = self._get_current_config()
+        scanner_ip = data.get("scanner_ip", "").strip()
+        if scanner_ip:
+            overrides["scanner_ip"] = scanner_ip
 
-        # Ensure we have a scanner connection
-        if self.scanner_info is None:
-            self._connect_scanner()
+        config = _get_config(**overrides)
 
-        with ESCLClient(self.scanner_info.base_url) as client:
-            # Check status
+        # Connect if needed
+        info = state.get("scanner_info")
+        if not info:
+            if config.scanner_ip:
+                info = scanner_info_from_ip(config.scanner_ip)
+            else:
+                info = discover_scanner(timeout=8.0)
+            state["scanner_info"] = info
+
+        with ESCLClient(info.base_url) as client:
             status = client.get_status()
             if status.state != "Idle":
                 raise AutoScanError(f"Scanner is {status.state}. Wait and try again.")
 
-            self.root.after(0, lambda: self._log("Scanning..."))
-
+            _log("Scanning...")
             settings = ScanSettings(
-                source=config.scan_source,
-                color_mode=config.color_mode,
-                resolution=config.resolution,
+                source=source,
+                color_mode=color,
+                resolution=resolution,
                 document_format=config.scan_format,
             )
             images = client.scan(settings)
 
-        self.scanned_images = images
-        self.root.after(0, lambda: self._log(f"Scanned {len(images)} page(s)"))
+        _log(f"Scanned {len(images)} page(s)")
+
+        result = {"ok": True, "pages": len(images)}
 
         if classify:
-            self.root.after(0, lambda: self._log("Analyzing with Claude Vision..."))
-            self.root.after(0, lambda: self.progress_var.set(50))
-
+            _log("Analyzing with Claude Vision...")
             doc_info = analyze_document(images, config)
-            self.doc_info = doc_info
-
-            self.root.after(0, lambda: self._show_results(doc_info))
-            self.root.after(0, lambda: self._log(f"Classified as: {doc_info.category}"))
+            _log(f"Classified as: {doc_info.category}")
 
             output_path = save_document(images, doc_info, config)
-            self.root.after(0, lambda: self._log(f"Saved: {output_path}"))
-            self.root.after(0, lambda: self.progress_var.set(100))
+            _log(f"Saved: {output_path}")
+
+            result.update({
+                "classified": True,
+                "category": doc_info.category,
+                "filename": doc_info.filename,
+                "summary": doc_info.summary,
+                "date": doc_info.date,
+                "key_fields": doc_info.key_fields,
+                "output_path": str(output_path),
+            })
         else:
             output_path = save_unclassified(images, config)
-            self.root.after(0, lambda: self._log(f"Saved (unclassified): {output_path}"))
-            self.root.after(0, lambda: self.progress_var.set(100))
+            _log(f"Saved: {output_path}")
+            result.update({
+                "classified": False,
+                "output_path": str(output_path),
+            })
 
-    def run(self) -> None:
-        self.root.mainloop()
+        return jsonify(result)
+
+    except Exception as e:
+        _log(f"Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/logs")
+def api_logs():
+    return jsonify(state["logs"])
+
+
+# ── HTML Template ────────────────────────────────────────────────────
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-Scan</title>
+<style>
+  :root { --bg: #f8f9fa; --card: #fff; --border: #dee2e6; --primary: #0d6efd; --primary-hover: #0b5ed7; --gray: #6c757d; --green: #198754; --red: #dc3545; --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; --mono: "SF Mono", Menlo, Monaco, monospace; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font); background: var(--bg); color: #212529; line-height: 1.5; }
+  .container { max-width: 740px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 24px; font-weight: 700; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gray); margin-bottom: 12px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: #495057; }
+  input[type="text"], select { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; font-family: var(--font); }
+  input:focus, select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(13,110,253,.15); }
+  .row { display: flex; gap: 12px; margin-bottom: 10px; }
+  .row > * { flex: 1; }
+  .radio-group { display: flex; gap: 16px; padding: 6px 0; }
+  .radio-group label { display: flex; align-items: center; gap: 6px; font-weight: 400; cursor: pointer; }
+  .btn-row { display: flex; gap: 10px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; font-family: var(--font); cursor: pointer; transition: background .15s; width: 100%; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+  .btn-secondary { background: #e9ecef; color: #495057; }
+  .btn-secondary:hover:not(:disabled) { background: #dee2e6; }
+  .btn-connect { padding: 8px 16px; width: auto; font-size: 14px; }
+  .connect-row { display: flex; gap: 8px; align-items: flex-end; }
+  .connect-row > :first-child { flex: 1; }
+  .status { font-size: 13px; padding: 6px 0; }
+  .status.connected { color: var(--green); font-weight: 600; }
+  .status.disconnected { color: var(--gray); }
+  .status.error { color: var(--red); }
+  .results-grid { display: grid; grid-template-columns: 100px 1fr; gap: 4px 12px; font-size: 14px; }
+  .results-grid dt { font-weight: 600; color: #495057; }
+  .results-grid dd { color: #212529; word-break: break-word; }
+  .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px; height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .spinner { display: none; width: 18px; height: 18px; border: 2px solid #fff4; border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .busy .spinner { display: inline-block; }
+  .output-path { margin-top: 10px; padding: 8px 12px; background: #d1e7dd; border-radius: 6px; font-size: 13px; word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Auto-Scan</h1>
+
+  <!-- Scanner Connection -->
+  <div class="card">
+    <h2>Scanner</h2>
+    <div class="connect-row">
+      <div>
+        <label for="scanner-ip">Scanner IP (leave blank for auto-discover)</label>
+        <input type="text" id="scanner-ip" placeholder="192.168.1.x">
+      </div>
+      <button class="btn btn-primary btn-connect" onclick="connect()">Connect</button>
+    </div>
+    <div class="status disconnected" id="scanner-status">Not connected</div>
+  </div>
+
+  <!-- Settings -->
+  <div class="card">
+    <h2>Settings</h2>
+    <div class="row">
+      <div>
+        <label>Source</label>
+        <div class="radio-group">
+          <label><input type="radio" name="source" value="Feeder" checked> Document Feeder</label>
+          <label><input type="radio" name="source" value="Platen"> Flatbed</label>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="resolution">Resolution</label>
+        <select id="resolution">
+          <option value="150">150 DPI</option>
+          <option value="200">200 DPI</option>
+          <option value="300" selected>300 DPI</option>
+          <option value="600">600 DPI</option>
+        </select>
+      </div>
+      <div>
+        <label for="color">Color Mode</label>
+        <select id="color">
+          <option value="RGB24">Color</option>
+          <option value="Grayscale8">Grayscale</option>
+        </select>
+      </div>
+    </div>
+    <div>
+      <label for="output-dir">Output Directory</label>
+      <input type="text" id="output-dir" value="">
+    </div>
+  </div>
+
+  <!-- Action Buttons -->
+  <div class="card">
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-classify" onclick="scan(true)" disabled>
+        <span class="spinner"></span>Scan &amp; Classify
+      </button>
+      <button class="btn btn-secondary" id="btn-scan" onclick="scan(false)" disabled>
+        <span class="spinner"></span>Scan Only
+      </button>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="card" id="results-card" style="display:none">
+    <h2>Classification Results</h2>
+    <dl class="results-grid">
+      <dt>Category</dt><dd id="r-category">--</dd>
+      <dt>Filename</dt><dd id="r-filename">--</dd>
+      <dt>Summary</dt><dd id="r-summary">--</dd>
+      <dt>Date</dt><dd id="r-date">--</dd>
+    </dl>
+    <div class="output-path" id="r-path" style="display:none"></div>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <h2>Activity Log</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+// Set default output dir
+fetch('/api/logs').then(r => r.json()).then(() => {
+  if (!$('#output-dir').value) {
+    $('#output-dir').value = '~/Documents/Scans';
+  }
+});
+
+function getSource() {
+  return document.querySelector('input[name="source"]:checked').value;
+}
+
+function setBusy(busy) {
+  $('#btn-classify').disabled = busy;
+  $('#btn-scan').disabled = busy;
+  if (busy) {
+    $('#btn-classify').classList.add('busy');
+    $('#btn-scan').classList.add('busy');
+  } else {
+    $('#btn-classify').classList.remove('busy');
+    $('#btn-scan').classList.remove('busy');
+  }
+}
+
+async function connect() {
+  const ip = $('#scanner-ip').value.trim();
+  const st = $('#scanner-status');
+  st.textContent = 'Connecting...';
+  st.className = 'status disconnected';
+
+  try {
+    const res = await fetch('/api/connect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      st.textContent = `${data.name} — ${data.state}`;
+      st.className = 'status connected';
+      $('#btn-classify').disabled = false;
+      $('#btn-scan').disabled = false;
+    } else {
+      st.textContent = `Error: ${data.error}`;
+      st.className = 'status error';
+    }
+  } catch(e) {
+    st.textContent = `Connection failed: ${e.message}`;
+    st.className = 'status error';
+  }
+  refreshLog();
+}
+
+async function scan(classify) {
+  setBusy(true);
+  $('#results-card').style.display = 'none';
+
+  try {
+    const res = await fetch('/api/scan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        classify,
+        source: getSource(),
+        resolution: $('#resolution').value,
+        color: $('#color').value,
+        output_dir: $('#output-dir').value,
+        scanner_ip: $('#scanner-ip').value.trim(),
+      })
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      if (data.classified) {
+        $('#results-card').style.display = '';
+        $('#r-category').textContent = data.category;
+        $('#r-filename').textContent = data.filename;
+        $('#r-summary').textContent = data.summary;
+        $('#r-date').textContent = data.date || '--';
+      }
+      if (data.output_path) {
+        $('#r-path').textContent = 'Saved to: ' + data.output_path;
+        $('#r-path').style.display = '';
+        if (!data.classified) {
+          $('#results-card').style.display = '';
+          $('#r-category').textContent = 'unsorted';
+          $('#r-filename').textContent = data.output_path.split('/').pop();
+          $('#r-summary').textContent = 'Saved without classification';
+          $('#r-date').textContent = '--';
+        }
+      }
+    } else {
+      alert('Error: ' + data.error);
+    }
+  } catch(e) {
+    alert('Request failed: ' + e.message);
+  }
+
+  setBusy(false);
+  refreshLog();
+}
+
+async function refreshLog() {
+  try {
+    const res = await fetch('/api/logs');
+    const logs = await res.json();
+    const el = $('#log');
+    el.textContent = logs.join('\n');
+    el.scrollTop = el.scrollHeight;
+  } catch(e) {}
+}
+
+// Poll logs every 2 seconds during operations
+setInterval(refreshLog, 2000);
+refreshLog();
+</script>
+</body>
+</html>"""
 
 
 def main() -> None:
-    app = AutoScanApp()
-    app.run()
+    port = 8470
+
+    try:
+        config = load_config()
+        _log("Config loaded")
+    except RuntimeError:
+        _log("Warning: No ANTHROPIC_API_KEY found. Set it in .env for AI classification.")
+
+    # Open browser after a short delay
+    def open_browser():
+        import time
+        time.sleep(1)
+        webbrowser.open(f"http://localhost:{port}")
+
+    threading.Thread(target=open_browser, daemon=True).start()
+
+    print(f"Auto-Scan running at http://localhost:{port}")
+    print("Press Ctrl+C to quit")
+
+    app.run(host="127.0.0.1", port=port, debug=False)
 
 
 if __name__ == "__main__":
