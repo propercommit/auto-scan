@@ -256,6 +256,7 @@ def api_scan():
                 "classified": True, "category": doc_info.category,
                 "filename": doc_info.filename, "summary": doc_info.summary,
                 "date": doc_info.date, "output_path": str(output_path),
+                "risk_level": doc_info.risk_level, "risks": doc_info.risks,
             })
         else:
             output_path = save_unclassified(images, config)
@@ -296,6 +297,8 @@ def api_scan_assisted():
             "summary": doc_info.summary,
             "date": doc_info.date,
             "key_fields": doc_info.key_fields,
+            "risk_level": doc_info.risk_level,
+            "risks": doc_info.risks,
         })
     except Exception as e:
         _log(f"Error: {e}")
@@ -434,6 +437,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .browse-row input { flex: 1; }
   .btn-browse { flex-shrink: 0; width: 40px; height: 38px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #fff; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, border-color .15s; }
   .btn-browse:hover { background: #e9ecef; border-color: var(--primary); }
+  .risk-alert { margin-top: 12px; padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.6; }
+  .risk-alert.risk-none { display: none; }
+  .risk-alert.risk-low { background: #fff3cd; border: 1px solid #ffc107; color: #664d03; }
+  .risk-alert.risk-medium { background: #ffe0cc; border: 1px solid #fd7e14; color: #803300; }
+  .risk-alert.risk-high { background: #f8d7da; border: 1px solid var(--red); color: #842029; }
+  .risk-alert h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .risk-alert ul { margin: 4px 0 0 16px; padding: 0; }
+  .risk-alert li { margin-bottom: 2px; }
 </style>
 </head>
 <body>
@@ -496,6 +507,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <dt>Summary</dt><dd id="r-summary">--</dd>
       <dt>Date</dt><dd id="r-date">--</dd>
     </dl>
+    <div class="risk-alert" id="r-risk" style="display:none"></div>
     <div class="output-path" id="r-path" style="display:none"></div>
   </div>
 
@@ -538,6 +550,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <h3>All Categories</h3>
           <div class="tag-grid" id="all-tags"></div>
         </div>
+        <div class="risk-alert" id="classify-risk" style="display:none"></div>
         <div class="classify-filename">
           <label for="classify-fn">Filename</label>
           <input type="text" id="classify-fn" value="">
@@ -555,6 +568,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 const $ = s => document.querySelector(s);
 let currentMode = 'auto';
 let selectedCategories = new Set();
+let pendingRisk = {level: null, risks: []};
 
 (async function init() {
   if (!$('#output-dir').value) $('#output-dir').value = '~/Documents/Scans';
@@ -623,7 +637,7 @@ async function scanOnly() {
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: false}) });
     const data = await res.json();
-    if (data.ok && data.output_path) { showResult('unsorted', data.output_path.split('/').pop(), 'Saved without classification', '--', data.output_path); }
+    if (data.ok && data.output_path) { showResult('unsorted', data.output_path.split('/').pop(), 'Saved without classification', '--', data.output_path, null, null); }
     else if (!data.ok) alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
@@ -636,7 +650,7 @@ async function doScanAuto() {
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: true}) });
     const data = await res.json();
-    if (data.ok && data.classified) { showResult(data.category, data.filename, data.summary, data.date, data.output_path); }
+    if (data.ok && data.classified) { showResult(data.category, data.filename, data.summary, data.date, data.output_path, data.risk_level, data.risks); }
     else if (!data.ok) alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
@@ -653,7 +667,18 @@ async function doScanAssisted() {
   setBusy(false); refreshLog();
 }
 
-function showResult(cat, fn, summary, date, path) {
+function renderRisk(el, level, risks) {
+  if (!level || level === 'none' || !risks || risks.length === 0) {
+    el.style.display = 'none'; el.className = 'risk-alert'; return;
+  }
+  const icons = {low: '\u26a0\ufe0f', medium: '\u26a0\ufe0f', high: '\ud83d\udea8'};
+  const labels = {low: 'Low Risk', medium: 'Medium Risk', high: 'High Risk'};
+  el.className = 'risk-alert risk-' + level;
+  el.style.display = '';
+  el.innerHTML = '<h4>' + (icons[level]||'') + ' ' + (labels[level]||level) + '</h4><ul>' + risks.map(r => '<li>' + r + '</li>').join('') + '</ul>';
+}
+
+function showResult(cat, fn, summary, date, path, riskLevel, risks) {
   $('#results-card').style.display = '';
   $('#r-category').textContent = cat;
   $('#r-filename').textContent = fn;
@@ -661,6 +686,7 @@ function showResult(cat, fn, summary, date, path) {
   $('#r-date').textContent = date || '--';
   $('#r-path').textContent = 'Saved to: ' + path;
   $('#r-path').style.display = '';
+  renderRisk($('#r-risk'), riskLevel, risks);
 }
 
 function showClassifyModal(data) {
@@ -690,6 +716,8 @@ function showClassifyModal(data) {
     allEl.appendChild(btn);
   });
 
+  pendingRisk = {level: data.risk_level, risks: data.risks};
+  renderRisk($('#classify-risk'), data.risk_level, data.risks);
   updateSelectedCount();
   $('#classify-modal').classList.add('active');
 }
@@ -729,7 +757,7 @@ async function saveClassified() {
       $('#classify-modal').classList.remove('active');
       const cats = data.categories.join(', ');
       const paths = data.output_paths.join('\n');
-      showResult(cats, $('#classify-fn').value, '', '--', paths);
+      showResult(cats, $('#classify-fn').value, '', '--', paths, pendingRisk.level, pendingRisk.risks);
     } else alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   $('#btn-save-classify').disabled = false;

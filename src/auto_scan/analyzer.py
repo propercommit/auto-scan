@@ -23,20 +23,30 @@ ALL_CATEGORIES = [
 ]
 
 ANALYSIS_PROMPT = """\
-You are a document classification and naming assistant. Analyze this scanned document and return a JSON response with:
+Analyze this scanned document. Return ONLY valid JSON (no markdown) with these fields:
 
-1. "category": one of: {categories}
-2. "filename": a descriptive filename using the pattern: YYYY-MM-DD_category_description.pdf
-   - Use the document date if visible, otherwise use today's date ({today})
-   - Keep the description short (2-5 words, lowercase, underscores)
-   - Examples: "2024-03-15_invoice_acme_corp.pdf", "2025-01-10_receipt_amazon.pdf"
-3. "summary": one-sentence description of the document
-4. "date": the document date in YYYY-MM-DD format, or null if not found
-5. "key_fields": object with extracted key-value pairs relevant to the category
-   (e.g., for invoice: {{"vendor": "...", "amount": "...", "invoice_number": "..."}})
-6. "suggested_categories": a list of 3-5 categories from the list above that best match this document, ranked by relevance (most relevant first). The first one should match "category".
-
-Return ONLY valid JSON, no markdown formatting or code blocks."""
+"category": one of: {categories}
+"filename": YYYY-MM-DD_category_who_what_details.pdf — include all key identifiers a human needs to find this file later. Examples:
+  - "2022-06-10_contract_bmw_x3_g01_sale_agreement.pdf"
+  - "2024-03-15_invoice_vodafone_march_89eur.pdf"
+  - "2025-01-10_receipt_amazon_lenovo_t14_laptop.pdf"
+  - "2024-11-20_insurance_allianz_car_policy_renewal.pdf"
+  - "2023-09-01_tax_2022_annual_return.pdf"
+  - "2024-07-22_medical_dr_mueller_blood_test_results.pdf"
+  Use document date if visible, else {today}. Lowercase, underscores, no spaces. Include: entity/company name, product/model, amounts, reference numbers — whatever makes this file uniquely identifiable at a glance.
+"summary": one sentence
+"date": YYYY-MM-DD or null
+"key_fields": relevant key-value pairs (vendor, amount, reference number, parties, etc.)
+"suggested_categories": 3-5 best matching categories, most relevant first
+"risk_level": "none", "low", "medium", or "high"
+"risks": array of short strings, each describing one concern found in the document. Look for:
+  - Scam indicators (fake logos, urgency pressure, unusual payment methods)
+  - Misleading or vague terms and conditions
+  - Hidden fees, auto-renewal traps, penalty clauses
+  - Unusually one-sided or unfair contract terms
+  - Inconsistencies (mismatched dates, names, amounts)
+  - Phishing signals (suspicious sender, links, requests for personal info)
+  Empty array if no risks found."""
 
 
 @dataclass
@@ -47,6 +57,8 @@ class DocumentInfo:
     date: str | None
     key_fields: dict = field(default_factory=dict)
     suggested_categories: list[str] = field(default_factory=list)
+    risk_level: str = "none"
+    risks: list[str] = field(default_factory=list)
 
 
 def _resize_for_api(image_data: bytes, max_dim: int = 1568) -> bytes:
@@ -130,10 +142,14 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
         date=data.get("date"),
         key_fields=data.get("key_fields", {}),
         suggested_categories=data.get("suggested_categories", []),
+        risk_level=data.get("risk_level", "none"),
+        risks=data.get("risks", []),
     )
 
     print(f"  Category: {doc_info.category}", file=sys.stderr)
     print(f"  Filename: {doc_info.filename}", file=sys.stderr)
     print(f"  Summary:  {doc_info.summary}", file=sys.stderr)
+    if doc_info.risks:
+        print(f"  Risk:     {doc_info.risk_level} ({len(doc_info.risks)} issue(s))", file=sys.stderr)
 
     return doc_info
