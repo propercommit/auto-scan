@@ -574,6 +574,8 @@ def _run_scan_job(data: dict, mode: str):
                     "date": doc_info.date, "key_fields": doc_info.key_fields,
                     "tags": doc_info.tags,
                     "risk_level": doc_info.risk_level, "risks": doc_info.risks,
+                    "confidence": doc_info.confidence,
+                    "page_confidence": doc_info.page_confidence,
                 })
 
             with _state_lock:
@@ -943,6 +945,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-doc-head { margin-bottom: 10px; }
   .batch-doc-title { font-size: 15px; font-weight: 700; color: #212529; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
   .batch-doc-title .batch-doc-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .confidence-badge { display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 10px; white-space: nowrap; flex-shrink: 0; }
+  .confidence-high { background: #d1e7dd; color: #146c43; }
+  .confidence-med { background: #fff3cd; color: #664d03; }
+  .confidence-low { background: #f8d7da; color: #b02a37; }
+  .page-confidence { font-size: 10px; font-weight: 700; position: absolute; top: 2px; right: 2px; padding: 1px 5px; border-radius: 6px; z-index: 1; }
+  .page-confidence.high { background: #d1e7dd; color: #146c43; }
+  .page-confidence.med { background: #fff3cd; color: #664d03; }
+  .page-confidence.low { background: #f8d7da; color: #b02a37; }
   .batch-doc-summary { font-size: 14px; color: var(--gray); margin-bottom: 8px; }
   .batch-page-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; min-height: 90px; padding: 10px; border: 2px dashed var(--border); border-radius: var(--radius); transition: border-color var(--transition), background var(--transition); }
   .batch-page-grid.drop-target { border-color: var(--primary); background: var(--primary-light); }
@@ -2093,7 +2103,11 @@ function renderBatchDocs() {
         moveOpts += '<option value="' + d + '"' + (d === i ? ' selected' : '') + '>' + esc(docShortName(batchData[d], d)) + '</option>';
       }
       moveOpts += '<option value="new">+ New doc</option>';
+      const pc = (doc.page_confidence && doc.page_confidence[pNum]) || doc.confidence || 100;
+      const pcClass = pc >= 85 ? 'high' : pc >= 65 ? 'med' : 'low';
+      const pcBadge = pc < 100 ? '<span class="page-confidence ' + pcClass + '">' + pc + '%</span>' : '';
       pagesHtml += '<div class="batch-page" draggable="true" data-page="' + pNum + '" data-doc="' + i + '">' +
+        pcBadge +
         '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '" onclick="openLightbox(' + pNum + ',' + i + ')" title="Click to preview" style="cursor:zoom-in" draggable="false">' +
         '<span>Page ' + pNum + '</span>' +
         '<select class="batch-page-move" data-page="' + pNum + '" data-doc="' + i + '" aria-label="Move page ' + pNum + '">' + moveOpts + '</select>' +
@@ -2114,10 +2128,13 @@ function renderBatchDocs() {
     const fn = doc.filename || '';
     const folder = doc.category || 'other';
 
+    const conf = doc.confidence || 100;
+    const confClass = conf >= 85 ? 'high' : conf >= 65 ? 'med' : 'low';
     card.innerHTML =
       '<div class="batch-doc-head">' +
         '<div class="batch-doc-title">' +
           '<span class="batch-doc-label">' + esc(docShortName(doc, i)) + (doc.summary ? ' \u2014 ' + esc(doc.summary) : '') + '</span>' +
+          '<span class="confidence-badge confidence-' + confClass + '" title="AI confidence in document grouping">' + conf + '%</span>' +
           (pages.length === 0 ? '<button class="btn-remove-doc" onclick="removeBatchDoc(' + i + ')">Remove</button>' : '') +
         '</div>' +
       '</div>' +

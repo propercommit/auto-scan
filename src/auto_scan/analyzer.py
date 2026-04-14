@@ -49,6 +49,8 @@ class DocumentInfo:
     tags: list[str] = field(default_factory=list)
     risk_level: str = "none"
     risks: list[str] = field(default_factory=list)
+    confidence: int = 100
+    page_confidence: dict[int, int] = field(default_factory=dict)
 
 
 def _open_image(image_data: bytes) -> Image.Image:
@@ -292,7 +294,15 @@ The CONTENT and DOCUMENT TYPE on the page is the strongest signal. Two pages tha
 ═══ STEP 3: CLASSIFY AND OUTPUT ═══
 Return ONLY valid JSON (no markdown) — an array of document groups:
 
-[{{"pages": [1, 2], "category": "...", "filename": "YYYY-MM-DD_cat_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
+[{{"pages": [1, 2], "page_confidence": {{"1": 95, "2": 80}}, "confidence": 87, "category": "...", "filename": "YYYY-MM-DD_cat_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
+
+CONFIDENCE SCORING (0–100):
+  - "page_confidence": for EACH page, how certain you are it belongs to THIS document group (0–100)
+  - "confidence": overall confidence for the entire document grouping (average of page scores)
+  - 90–100: Very clear match (same header, reference number, formatting)
+  - 70–89: Likely match (similar content/style, but some ambiguity)
+  - 50–69: Uncertain (could belong to another document)
+  - 0–49: Very uncertain (weak evidence for this grouping)
 
 Categories: {categories}
 Pages numbered 1–{num_pages}. Every page must appear in exactly one group. Use the document date if visible, otherwise {today}. Filenames: lowercase underscores, include entity names, amounts, ref numbers. Tags: 5-15 lowercase keywords from the content."""
@@ -402,9 +412,40 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
         else:
             raise AnalysisError(f"Expected JSON array from batch analysis, got {type(data).__name__}")
 
+    results = _parse_batch_results(data)
+
+    for pages, doc_info in results:
+        page_nums = [p + 1 for p in pages]
+        print(f"  Doc: {doc_info.filename} (pages {page_nums}, confidence {doc_info.confidence}%)", file=sys.stderr)
+
+    # ── Verification pass for low-confidence pages ──────────────────
+    CONFIDENCE_THRESHOLD = 75
+    uncertain_pages = []
+    for pages, doc_info in results:
+        for p in pages:
+            page_num = p + 1
+            pc = doc_info.page_confidence.get(page_num, doc_info.confidence)
+            if pc < CONFIDENCE_THRESHOLD:
+                uncertain_pages.append(page_num)
+
+    if uncertain_pages:
+        print(f"  {len(uncertain_pages)} uncertain page(s) (confidence < {CONFIDENCE_THRESHOLD}%), running verification...", file=sys.stderr)
+        results = _verify_uncertain_pages(
+            images, results, uncertain_pages, content, config, client,
+        )
+
+    print(f"Detected {len(results)} document(s)", file=sys.stderr)
+    return results
+
+
+def _parse_batch_results(data: list[dict]) -> list[tuple[list[int], DocumentInfo]]:
+    """Parse batch analysis JSON into (pages, DocumentInfo) tuples."""
     results = []
     for doc in data:
-        pages = [p - 1 for p in doc.get("pages", [])]  # 1-indexed → 0-indexed
+        pages = [p - 1 for p in doc.get("pages", [])]
+        page_conf_raw = doc.get("page_confidence", {})
+        page_confidence = {int(k): int(v) for k, v in page_conf_raw.items()}
+        confidence = int(doc.get("confidence", 100))
         doc_info = DocumentInfo(
             category=doc.get("category", "other"),
             filename=doc.get("filename", f"{date.today().isoformat()}_document.pdf"),
@@ -415,9 +456,149 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
             tags=doc.get("tags", []),
             risk_level=doc.get("risk_level", "none"),
             risks=doc.get("risks", []),
+            confidence=confidence,
+            page_confidence=page_confidence,
         )
         results.append((pages, doc_info))
-        print(f"  Doc {len(results)}: {doc_info.filename} (pages {doc.get('pages', [])})", file=sys.stderr)
+    return results
 
-    print(f"Detected {len(results)} document(s)", file=sys.stderr)
+
+VERIFY_PROMPT = """\
+You are verifying uncertain page assignments in a document sorting task.
+
+The first model sorted {num_pages} scanned pages into document groups, but was uncertain about {num_uncertain} page(s): {uncertain_list}.
+
+Its initial grouping was:
+{initial_grouping}
+
+For EACH uncertain page, look at the image carefully and decide:
+  - Does it belong to the document group it was assigned to?
+  - Or should it be moved to a different group?
+  - Or should it be its own separate document?
+
+Return ONLY valid JSON — an array of reassignments (empty array if all assignments are correct):
+[{{"page": 3, "move_to_doc": 1, "reason": "short explanation"}}]
+
+"move_to_doc" is the 1-based document number from the initial grouping, or "new" to create a separate document.
+If a page's assignment is correct, do NOT include it in the array."""
+
+
+def _verify_uncertain_pages(
+    images: list[bytes],
+    results: list[tuple[list[int], DocumentInfo]],
+    uncertain_pages: list[int],
+    original_content: list[dict],
+    config: Config,
+    client: anthropic.Anthropic,
+) -> list[tuple[list[int], DocumentInfo]]:
+    """Re-analyze uncertain pages with a verification model."""
+
+    # Build a summary of the initial grouping for context
+    grouping_lines = []
+    for i, (pages, doc_info) in enumerate(results):
+        page_nums = [p + 1 for p in pages]
+        confs = [f"p{p}:{doc_info.page_confidence.get(p, doc_info.confidence)}%" for p in page_nums]
+        grouping_lines.append(
+            f"  Doc {i + 1}: pages {page_nums} — {doc_info.category} — \"{doc_info.summary}\" ({', '.join(confs)})"
+        )
+
+    verify_text = VERIFY_PROMPT.format(
+        num_pages=sum(len(pages) for pages, _ in results),
+        num_uncertain=len(uncertain_pages),
+        uncertain_list=", ".join(str(p) for p in uncertain_pages),
+        initial_grouping="\n".join(grouping_lines),
+    )
+
+    # Send only the uncertain page images + context
+    verify_content: list[dict] = []
+    for p in uncertain_pages:
+        labeled = _label_page(images[p - 1], p, max_dim=1568)
+        b64 = base64.standard_b64encode(labeled).decode("ascii")
+        verify_content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+    verify_content.append({"type": "text", "text": verify_text})
+
+    # Use Opus for verification — more capable model for uncertain pages
+    verify_model = "claude-opus-4-20250514"
+
+    try:
+        check_rate_limit()
+        message = client.messages.create(
+            model=verify_model,
+            max_tokens=2048,
+            system="You are a document verification API. Output ONLY valid JSON arrays. No explanations.",
+            messages=[
+                {"role": "user", "content": verify_content},
+                {"role": "assistant", "content": "["},
+            ],
+        )
+    except Exception as e:
+        print(f"  Verification failed ({e}), keeping original assignments", file=sys.stderr)
+        return results
+
+    record_usage(message.usage.input_tokens, message.usage.output_tokens)
+    print(
+        f"  Verify tokens: {message.usage.input_tokens:,} in + {message.usage.output_tokens:,} out",
+        file=sys.stderr,
+    )
+
+    response_text = "[" + "".join(
+        block.text for block in message.content if hasattr(block, "text")
+    ).strip()
+
+    try:
+        reassignments = json.loads(response_text)
+    except json.JSONDecodeError:
+        print("  Verification response not parseable, keeping original", file=sys.stderr)
+        return results
+
+    if not isinstance(reassignments, list) or not reassignments:
+        print("  Verification confirmed all assignments", file=sys.stderr)
+        return results
+
+    # Apply reassignments
+    for fix in reassignments:
+        page = fix.get("page")
+        target = fix.get("move_to_doc")
+        reason = fix.get("reason", "")
+        if not page:
+            continue
+
+        page_0 = page - 1  # 0-indexed
+
+        # Find which doc currently has this page
+        src_idx = None
+        for i, (pages, _) in enumerate(results):
+            if page_0 in pages:
+                src_idx = i
+                break
+        if src_idx is None:
+            continue
+
+        if target == "new":
+            # Create a new single-page document
+            results[src_idx][0].remove(page_0)
+            new_doc = DocumentInfo(
+                category="other",
+                filename=f"{date.today().isoformat()}_page_{page}.pdf",
+                summary=f"Separated by verification: {reason}",
+                date=None,
+                confidence=50,
+                page_confidence={page: 50},
+            )
+            results.append(([page_0], new_doc))
+            print(f"  Verify: page {page} → new document ({reason})", file=sys.stderr)
+        else:
+            dst_idx = int(target) - 1  # 1-indexed → 0-indexed
+            if 0 <= dst_idx < len(results) and dst_idx != src_idx:
+                results[src_idx][0].remove(page_0)
+                results[dst_idx][0].append(page_0)
+                results[dst_idx][0].sort()
+                print(f"  Verify: page {page} → doc {target} ({reason})", file=sys.stderr)
+
+    # Remove empty document groups
+    results = [(pages, doc_info) for pages, doc_info in results if pages]
+
     return results
