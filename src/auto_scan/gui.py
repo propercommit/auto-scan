@@ -570,6 +570,13 @@ def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: li
 
 def _run_scan_job(data: dict, mode: str):
     """Run a scan job in a background thread. Updates state['job']."""
+    # Clear stale state from any previous scan
+    with _state_lock:
+        state["pending_images"] = None
+        state["pending_doc_info"] = None
+        state["pending_batch_docs"] = None
+        state["pending_config"] = None
+        state["_redacted_previews"] = {}
     try:
         # Load settings
         settings = _load_settings()
@@ -2944,6 +2951,12 @@ function scanNext() {
   const riskEl = $('#r-risk'); if (riskEl) { riskEl.style.display = 'none'; riskEl.innerHTML = ''; }
   const pathEl = $('#r-path'); if (pathEl) { pathEl.style.display = 'none'; pathEl.innerHTML = ''; }
   $('#batch-results-list').innerHTML = '';
+  // Clear stale batch data from previous scan
+  batchData = [];
+  batchPages = [];
+  batchTags = [];
+  allPreviews = [];
+  pageRedactions = {};
   window.scrollTo({top: 0, behavior: 'smooth'});
 }
 
