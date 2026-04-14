@@ -18,6 +18,8 @@ from PIL import Image
 from auto_scan import AutoScanError
 from auto_scan.analyzer import ALL_CATEGORIES, DocumentInfo, analyze_document
 from auto_scan.config import Config, load_config
+from auto_scan.dedup import image_hash
+from auto_scan.history import find_by_hash, record_scan, search_history
 from auto_scan.organizer import save_document, save_unclassified
 from auto_scan.scanner.discovery import ScannerInfo, discover_scanner, scanner_info_from_ip
 from auto_scan.scanner.escl import ESCLClient, ScanSettings
@@ -31,6 +33,8 @@ state = {
     "logs": [],
     "pending_images": None,
     "pending_doc_info": None,
+    "job": None,  # {"status": "scanning"|"analyzing"|"saving"|"done"|"error", "result": ...}
+    "scanner_caps": None,  # Cached capabilities from last connect
 }
 
 
@@ -237,74 +241,149 @@ def _do_scan(data: dict) -> tuple[list[bytes], Config]:
     return images, config
 
 
-@app.route("/api/scan", methods=["POST"])
-def api_scan():
-    """Automatic mode: scan, classify, save in one shot."""
-    data = request.json or {}
-    classify = data.get("classify", True)
-    try:
-        images, config = _do_scan(data)
-        result = {"ok": True, "pages": len(images)}
+def _check_duplicate(images: list[bytes], config: Config) -> dict | None:
+    """Check if these images were scanned before. Returns previous record or None."""
+    h = image_hash(images)
+    state["_last_hash"] = h
+    prev = find_by_hash(config.output_dir, h)
+    return prev
 
-        if classify:
+
+def _record(config, doc_info, folder, tags, pages, output_path):
+    """Record a scan in the history database."""
+    record_scan(
+        output_dir=config.output_dir,
+        filename=doc_info.filename if doc_info else Path(output_path).name,
+        folder=folder,
+        tags=tags,
+        category=doc_info.category if doc_info else "unsorted",
+        summary=doc_info.summary if doc_info else "",
+        doc_date=doc_info.date if doc_info else None,
+        risk_level=doc_info.risk_level if doc_info else "none",
+        risks=doc_info.risks if doc_info else [],
+        pages=pages,
+        output_path=str(output_path),
+        image_hash=state.get("_last_hash"),
+    )
+
+
+def _run_scan_job(data: dict, mode: str):
+    """Run a scan job in a background thread. Updates state['job']."""
+    try:
+        state["job"] = {"status": "scanning"}
+        images, config = _do_scan(data)
+        state["job"]["status"] = "scanning"
+
+        # Duplicate check
+        prev = _check_duplicate(images, config)
+        if prev:
+            _log(f"Duplicate detected: previously saved as {prev['filename']}")
+            state["job"] = {
+                "status": "duplicate",
+                "result": {"duplicate": True, "previous": prev},
+            }
+            return
+
+        if mode == "auto":
+            classify = data.get("classify", True)
+            if classify:
+                state["job"]["status"] = "analyzing"
+                _log("Analyzing with Claude Vision...")
+                doc_info = analyze_document(images, config)
+                _log(f"Classified as: {doc_info.category}")
+
+                state["job"]["status"] = "saving"
+                output_path = save_document(images, doc_info, config, tags=doc_info.tags)
+                _log(f"Saved: {output_path}")
+                _record(config, doc_info, doc_info.category, doc_info.tags, len(images), output_path)
+
+                state["job"] = {
+                    "status": "done",
+                    "result": {
+                        "ok": True, "classified": True, "pages": len(images),
+                        "category": doc_info.category, "filename": doc_info.filename,
+                        "summary": doc_info.summary, "date": doc_info.date,
+                        "output_path": str(output_path), "tags": doc_info.tags,
+                        "risk_level": doc_info.risk_level, "risks": doc_info.risks,
+                    },
+                }
+            else:
+                state["job"]["status"] = "saving"
+                output_path = save_unclassified(images, config)
+                _log(f"Saved: {output_path}")
+                _record(config, None, "unsorted", [], len(images), output_path)
+
+                state["job"] = {
+                    "status": "done",
+                    "result": {
+                        "ok": True, "classified": False, "pages": len(images),
+                        "output_path": str(output_path),
+                    },
+                }
+
+        elif mode == "assisted":
+            state["job"]["status"] = "analyzing"
             _log("Analyzing with Claude Vision...")
             doc_info = analyze_document(images, config)
-            _log(f"Classified as: {doc_info.category}")
-            output_path = save_document(images, doc_info, config, tags=doc_info.tags)
-            _log(f"Saved: {output_path}")
-            result.update({
-                "classified": True, "category": doc_info.category,
-                "filename": doc_info.filename, "summary": doc_info.summary,
-                "date": doc_info.date, "output_path": str(output_path),
-                "tags": doc_info.tags,
-                "risk_level": doc_info.risk_level, "risks": doc_info.risks,
-            })
-        else:
-            output_path = save_unclassified(images, config)
-            _log(f"Saved: {output_path}")
-            result.update({"classified": False, "output_path": str(output_path)})
+            _log(f"AI suggests: {doc_info.category}")
 
-        return jsonify(result)
+            state["pending_images"] = images
+            state["pending_doc_info"] = doc_info
+            state["pending_config"] = config
+
+            thumb = _make_thumbnail(images[0])
+            preview_b64 = base64.b64encode(thumb).decode("ascii")
+
+            state["job"] = {
+                "status": "done",
+                "result": {
+                    "ok": True, "pages": len(images), "preview": preview_b64,
+                    "category": doc_info.category,
+                    "suggested_categories": doc_info.suggested_categories,
+                    "all_categories": ALL_CATEGORIES,
+                    "filename": doc_info.filename, "summary": doc_info.summary,
+                    "date": doc_info.date, "key_fields": doc_info.key_fields,
+                    "tags": doc_info.tags,
+                    "risk_level": doc_info.risk_level, "risks": doc_info.risks,
+                },
+            }
+
     except Exception as e:
         _log(f"Error: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        state["job"] = {"status": "error", "result": {"ok": False, "error": str(e)}}
+
+
+@app.route("/api/scan", methods=["POST"])
+def api_scan():
+    """Automatic mode: start scan job in background."""
+    if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
+        return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
+    data = request.json or {}
+    threading.Thread(
+        target=_run_scan_job, args=(data, "auto"), daemon=True,
+    ).start()
+    return jsonify({"ok": True, "status": "started"})
 
 
 @app.route("/api/scan-assisted", methods=["POST"])
 def api_scan_assisted():
-    """Assisted mode: scan + analyze, return suggestions, don't save yet."""
+    """Assisted mode: start scan + analyze job in background."""
+    if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
+        return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
     data = request.json or {}
-    try:
-        images, config = _do_scan(data)
+    threading.Thread(
+        target=_run_scan_job, args=(data, "assisted"), daemon=True,
+    ).start()
+    return jsonify({"ok": True, "status": "started"})
 
-        _log("Analyzing with Claude Vision...")
-        doc_info = analyze_document(images, config)
-        _log(f"AI suggests: {doc_info.category}")
 
-        state["pending_images"] = images
-        state["pending_doc_info"] = doc_info
-
-        thumb = _make_thumbnail(images[0])
-        preview_b64 = base64.b64encode(thumb).decode("ascii")
-
-        return jsonify({
-            "ok": True,
-            "pages": len(images),
-            "preview": preview_b64,
-            "category": doc_info.category,
-            "suggested_categories": doc_info.suggested_categories,
-            "all_categories": ALL_CATEGORIES,
-            "filename": doc_info.filename,
-            "summary": doc_info.summary,
-            "date": doc_info.date,
-            "key_fields": doc_info.key_fields,
-            "tags": doc_info.tags,
-            "risk_level": doc_info.risk_level,
-            "risks": doc_info.risks,
-        })
-    except Exception as e:
-        _log(f"Error: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+@app.route("/api/job")
+def api_job():
+    """Poll the current scan job status."""
+    job = state.get("job")
+    if not job:
+        return jsonify({"status": "idle"})
+    return jsonify(job)
 
 
 @app.route("/api/save-classified", methods=["POST"])
@@ -317,6 +396,7 @@ def api_save_classified():
 
     images = state.get("pending_images")
     doc_info = state.get("pending_doc_info")
+    config = state.get("pending_config")
 
     if not images or not doc_info:
         return jsonify({"ok": False, "error": "No pending scan to save."}), 400
@@ -325,9 +405,10 @@ def api_save_classified():
         if filename:
             doc_info.filename = filename
 
-        config = _get_config(
-            **({"output_dir": data["output_dir"]} if data.get("output_dir") else {}),
-        )
+        if not config:
+            config = _get_config(
+                **({"output_dir": data["output_dir"]} if data.get("output_dir") else {}),
+            )
 
         output_path = save_document(
             images, doc_info, config, folder=folder, tags=tags,
@@ -336,8 +417,11 @@ def api_save_classified():
         if tags:
             _log(f"  Tags: {', '.join(tags)}")
 
+        _record(config, doc_info, folder, tags, len(images), output_path)
+
         state["pending_images"] = None
         state["pending_doc_info"] = None
+        state["pending_config"] = None
 
         return jsonify({
             "ok": True,
@@ -348,6 +432,18 @@ def api_save_classified():
     except Exception as e:
         _log(f"Error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/history")
+def api_history():
+    """Search scan history."""
+    query = request.args.get("q", "")
+    try:
+        config = _get_config()
+    except RuntimeError:
+        config = type("C", (), {"output_dir": Path("~/Documents/Scans").expanduser()})()
+    results = search_history(config.output_dir, query)
+    return jsonify(results)
 
 
 @app.route("/api/logs")
@@ -641,12 +737,39 @@ async function browseFolder() {
 function getScanParams() {
   return { source: document.querySelector('input[name="source"]:checked').value, resolution: $('#resolution').value, color: $('#color').value, output_dir: $('#output-dir').value, scanner_ip: $('#scanner-ip').value.trim() };
 }
-function setBusy(busy) {
+function setBusy(busy, statusText) {
   $('#btn-classify').disabled = busy; $('#btn-scan').disabled = busy;
   $('#btn-classify').setAttribute('aria-busy', busy);
   $('#btn-scan').setAttribute('aria-busy', busy);
   ['#btn-classify','#btn-scan'].forEach(s => $(s).classList.toggle('busy', busy));
   document.querySelectorAll('.busy-text').forEach(el => el.hidden = !busy);
+  if (statusText) {
+    const labels = {scanning: 'Scanning...', analyzing: 'Analyzing...', saving: 'Saving...'};
+    const txt = labels[statusText] || statusText;
+    document.querySelectorAll('.busy-text').forEach(el => el.textContent = txt);
+  }
+}
+
+function pollJob() {
+  return new Promise((resolve, reject) => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/job');
+        const job = await res.json();
+        if (job.status === 'scanning' || job.status === 'analyzing' || job.status === 'saving') {
+          setBusy(true, job.status);
+          refreshLog();
+          return; // keep polling
+        }
+        clearInterval(interval);
+        refreshLog();
+        resolve(job);
+      } catch(e) {
+        clearInterval(interval);
+        reject(e);
+      }
+    }, 600);
+  });
 }
 
 async function connect() {
@@ -663,12 +786,15 @@ async function connect() {
 }
 
 async function scanOnly() {
-  setBusy(true); $('#results-card').style.display = 'none';
+  setBusy(true, 'scanning'); $('#results-card').style.display = 'none';
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: false}) });
-    const data = await res.json();
-    if (data.ok && data.output_path) { showResult({folder: 'unsorted', tags: [], filename: data.output_path.split('/').pop(), summary: 'Saved without classification', path: data.output_path}); }
-    else if (!data.ok) alert('Error: ' + data.error);
+    const start = await res.json();
+    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    const job = await pollJob();
+    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
+    else if (job.status === 'done' && job.result) { showResult({folder: 'unsorted', tags: [], filename: (job.result.output_path || '').split('/').pop(), summary: 'Saved without classification', path: job.result.output_path}); }
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
 }
@@ -676,23 +802,32 @@ async function scanOnly() {
 function doScan() { return currentMode === 'auto' ? doScanAuto() : doScanAssisted(); }
 
 async function doScanAuto() {
-  setBusy(true); $('#results-card').style.display = 'none';
+  setBusy(true, 'scanning'); $('#results-card').style.display = 'none';
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: true}) });
-    const data = await res.json();
-    if (data.ok && data.classified) { showResult({folder: data.category, tags: data.tags || [data.category], filename: data.filename, summary: data.summary, date: data.date, path: data.output_path, riskLevel: data.risk_level, risks: data.risks}); }
-    else if (!data.ok) alert('Error: ' + data.error);
+    const start = await res.json();
+    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    const job = await pollJob();
+    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
+    else if (job.status === 'done' && job.result && job.result.classified) {
+      const d = job.result;
+      showResult({folder: d.category, tags: d.tags || [d.category], filename: d.filename, summary: d.summary, date: d.date, path: d.output_path, riskLevel: d.risk_level, risks: d.risks});
+    }
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
 }
 
 async function doScanAssisted() {
-  setBusy(true); $('#results-card').style.display = 'none';
+  setBusy(true, 'scanning'); $('#results-card').style.display = 'none';
   try {
     const res = await fetch('/api/scan-assisted', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(getScanParams()) });
-    const data = await res.json();
-    if (data.ok) showClassifyModal(data);
-    else alert('Error: ' + data.error);
+    const start = await res.json();
+    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    const job = await pollJob();
+    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
+    else if (job.status === 'done' && job.result && job.result.ok) { showClassifyModal(job.result); }
   } catch(e) { alert('Failed: ' + e.message); }
   setBusy(false); refreshLog();
 }

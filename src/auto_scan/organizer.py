@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,21 @@ import pikepdf
 
 from auto_scan.analyzer import DocumentInfo
 from auto_scan.config import Config
+
+_HAS_OCRMYPDF = shutil.which("ocrmypdf") is not None
+
+
+def _ocr_pdf(path: Path) -> None:
+    """Add a searchable text layer to a PDF in-place using ocrmypdf."""
+    if not _HAS_OCRMYPDF:
+        return
+    try:
+        subprocess.run(
+            ["ocrmypdf", "--skip-text", "--quiet", str(path), str(path)],
+            check=True, timeout=120,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(f"  OCR warning: {e}", file=sys.stderr)
 
 
 def _embed_tags(pdf_bytes: bytes, tags: list[str], summary: str = "") -> bytes:
@@ -64,6 +81,7 @@ def save_document(
         counter += 1
 
     output_path.write_bytes(pdf_bytes)
+    _ocr_pdf(output_path)
 
     print(f"Saved: {output_path}", file=sys.stderr)
     if embed_tags:
@@ -82,6 +100,7 @@ def save_unclassified(images: list[bytes], config: Config) -> Path:
 
     pdf_bytes = img2pdf.convert(images)
     output_path.write_bytes(pdf_bytes)
+    _ocr_pdf(output_path)
 
     print(f"Saved: {output_path}", file=sys.stderr)
     return output_path

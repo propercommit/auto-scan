@@ -50,22 +50,19 @@ class DocumentInfo:
 
 
 def _resize_for_api(image_data: bytes, max_dim: int = 1568) -> bytes:
-    """Resize image for API and compress. Full-quality originals are kept for the PDF."""
+    """Resize image if either dimension exceeds max_dim, preserving aspect ratio."""
     img = Image.open(io.BytesIO(image_data))
     w, h = img.size
 
     if w <= max_dim and h <= max_dim:
-        # Still re-encode at lower quality to reduce token cost
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=60)
-        return buf.getvalue()
+        return image_data
 
     scale = max_dim / max(w, h)
     new_size = (int(w * scale), int(h * scale))
     img = img.resize(new_size, Image.LANCZOS)
 
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=60)
+    img.save(buf, format="JPEG", quality=85)
     return buf.getvalue()
 
 
