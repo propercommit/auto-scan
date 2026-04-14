@@ -133,7 +133,19 @@ def _label_page(image_data: bytes, page_num: int, max_dim: int = 1568) -> bytes:
     return buf.getvalue()
 
 
-def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
+def _maybe_redact(image_data: bytes, redact_enabled: bool, redact_patterns: set[str] | None = None) -> bytes:
+    """Optionally redact sensitive information from image before sending to API."""
+    if not redact_enabled:
+        return image_data
+    from auto_scan.redactor import redact_image
+    result = redact_image(image_data, enabled_patterns=redact_patterns)
+    return result.redacted_image
+
+
+def analyze_document(
+    images: list[bytes], config: Config,
+    redact: bool = False, redact_patterns: set[str] | None = None,
+) -> DocumentInfo:
     """Send scanned page images to Claude Vision for classification and naming."""
     check_rate_limit()
     print("Analyzing document with AI...", file=sys.stderr)
@@ -143,7 +155,8 @@ def analyze_document(images: list[bytes], config: Config) -> DocumentInfo:
     # Build message content: one image block per page + text prompt
     content: list[dict] = []
     for i, img_data in enumerate(images[:20]):  # Claude supports up to 20 images
-        resized = _resize_for_api(img_data)
+        safe_img = _maybe_redact(img_data, redact, redact_patterns)
+        resized = _resize_for_api(safe_img)
         b64 = base64.standard_b64encode(resized).decode("ascii")
         content.append(
             {
@@ -308,7 +321,10 @@ Categories: {categories}
 Pages numbered 1–{num_pages}. Every page must appear in exactly one group. Use the document date if visible, otherwise {today}. Filenames: lowercase underscores, include entity names, amounts, ref numbers. Tags: 5-15 lowercase keywords from the content."""
 
 
-def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], DocumentInfo]]:
+def analyze_batch(
+    images: list[bytes], config: Config,
+    redact: bool = False, redact_patterns: set[str] | None = None,
+) -> list[tuple[list[int], DocumentInfo]]:
     """Analyze a batch of scanned pages, group by document, classify each group.
 
     Returns a list of (page_indices, DocumentInfo) tuples where page_indices
@@ -323,7 +339,8 @@ def analyze_batch(images: list[bytes], config: Config) -> list[tuple[list[int], 
 
     content: list[dict] = []
     for i, img_data in enumerate(images):
-        labeled = _label_page(img_data, i + 1, max_dim=1568)
+        safe_img = _maybe_redact(img_data, redact, redact_patterns)
+        labeled = _label_page(safe_img, i + 1, max_dim=1568)
         b64 = base64.standard_b64encode(labeled).decode("ascii")
         content.append({
             "type": "image",

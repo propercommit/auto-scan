@@ -420,8 +420,11 @@ def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: li
 def _run_scan_job(data: dict, mode: str):
     """Run a scan job in a background thread. Updates state['job']."""
     try:
-        # Check dollar budget before starting
-        daily_budget = float(_load_settings().get("daily_budget", 0))
+        # Load settings
+        settings = _load_settings()
+        daily_budget = float(settings.get("daily_budget", 0))
+        redact = bool(settings.get("redact_enabled"))
+        redact_pats = set(settings.get("redact_patterns", "").split(",")) - {""} if redact else None
         if daily_budget > 0:
             usage = get_usage()
             if usage["estimated_cost"] >= daily_budget:
@@ -445,13 +448,30 @@ def _run_scan_job(data: dict, mode: str):
                 }
             return
 
+        # Pre-scan redaction check
+        if redact:
+            from auto_scan.redactor import redact_image
+            total_redactions = 0
+            all_redacted_types = set()
+            for img_data in images:
+                r = redact_image(img_data, enabled_patterns=redact_pats)
+                total_redactions += r.redaction_count
+                all_redacted_types.update(r.redacted_types)
+            if total_redactions > 0:
+                _log(f"Redacted {total_redactions} sensitive region(s) [{', '.join(sorted(all_redacted_types))}] before sending to AI")
+                with _state_lock:
+                    state["job"]["redaction"] = {
+                        "count": total_redactions,
+                        "types": sorted(all_redacted_types),
+                    }
+
         if mode == "auto":
             classify = data.get("classify", True)
             if classify:
                 with _state_lock:
                     state["job"]["status"] = "analyzing"
                 _log("Analyzing with Claude Vision...")
-                doc_info = analyze_document(images, config)
+                doc_info = analyze_document(images, config, redact=redact, redact_patterns=redact_pats)
                 _log(f"Classified as: {doc_info.category}")
 
                 with _state_lock:
@@ -519,7 +539,7 @@ def _run_scan_job(data: dict, mode: str):
             with _state_lock:
                 state["job"]["status"] = "analyzing"
             _log(f"Batch analyzing {len(images)} pages...")
-            batch_results = analyze_batch(images, config)
+            batch_results = analyze_batch(images, config, redact=redact, redact_patterns=redact_pats)
             _log(f"Detected {len(batch_results)} document(s)")
 
             with _state_lock:
@@ -554,7 +574,7 @@ def _run_scan_job(data: dict, mode: str):
             with _state_lock:
                 state["job"]["status"] = "analyzing"
             _log(f"Batch analyzing {len(images)} pages...")
-            batch_results = analyze_batch(images, config)
+            batch_results = analyze_batch(images, config, redact=redact, redact_patterns=redact_pats)
             _log(f"Detected {len(batch_results)} document(s)")
 
             # Thumbnails for ALL pages so frontend can rearrange freely
@@ -843,6 +863,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .scan-progress-pages { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
   .scan-progress-page { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; background: #1A1D2B; border-radius: 6px; font-size: 12px; font-family: var(--mono); color: #94A3B8; animation: fadeSlideIn .3s ease; }
   .scan-progress-page svg { color: #34D399; }
+  .redact-alert { margin-top: 10px; padding: 10px 14px; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.25); border-radius: 8px; font-size: 13px; color: #FCA5A5; display: flex; align-items: center; gap: 8px; }
+  .redact-alert svg { flex-shrink: 0; color: #F87171; }
   @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
   .btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border: none; border-radius: var(--radius); font-size: 15px; font-weight: 600; font-family: var(--font); cursor: pointer; transition: background var(--transition), box-shadow var(--transition), transform .1s; width: 100%; }
   .btn:hover:not(:disabled) { box-shadow: 0 2px 8px rgba(0,0,0,.1); }
@@ -1206,6 +1228,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
       <div class="field-hint">Blocks API calls when estimated daily spend reaches this amount. Resets at midnight.</div>
     </div>
+    <div style="margin-top:14px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="redact-toggle" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)">
+        <span>Redact sensitive data before sending to AI</span>
+      </label>
+      <div class="field-hint">Uses local OCR to detect and black out sensitive patterns in images before they reach the API. Requires <code>tesseract</code> and <code>pytesseract</code>.</div>
+      <div id="redact-patterns" style="display:none;margin-top:8px;padding-left:26px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="ssn" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> SSN (US Social Security)</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="ahv" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> AHV/AVS (Swiss)</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="credit_card" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Credit card numbers</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="iban" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> IBAN</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="phone" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Phone numbers</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="email" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Email addresses</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="dob" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Dates of birth</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" value="passport" onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> Passport numbers</label>
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -1225,6 +1264,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <span class="scan-progress-text" id="scan-progress-text">Scanning...</span>
       </div>
       <div class="scan-progress-pages" id="scan-progress-pages"></div>
+      <div class="redact-alert" id="redact-alert" style="display:none"></div>
     </div>
   </div>
 
@@ -1354,6 +1394,11 @@ let pendingRisk = {level: null, risks: []};
     }
     if (s.mode) setMode(s.mode);
     if (s.daily_budget && s.daily_budget !== '0') $('#daily-budget').value = s.daily_budget;
+    if (s.redact_enabled) { $('#redact-toggle').checked = true; $('#redact-patterns').style.display = ''; }
+    if (s.redact_patterns) {
+      const pats = s.redact_patterns.split(',');
+      document.querySelectorAll('#redact-patterns input[type="checkbox"]').forEach(cb => { cb.checked = pats.includes(cb.value); });
+    }
   } catch(e) {}
   // Fallback handled by /api/settings defaults
   try {
@@ -1370,6 +1415,10 @@ let pendingRisk = {level: null, risks: []};
   refreshUsage();
 })();
 
+$('#redact-toggle').addEventListener('change', function() {
+  $('#redact-patterns').style.display = this.checked ? '' : 'none';
+});
+
 function saveSettings() {
   const settings = {
     output_dir: $('#output-dir').value,
@@ -1379,6 +1428,8 @@ function saveSettings() {
     scan_source: document.querySelector('input[name="source"]:checked').value,
     mode: currentMode,
     daily_budget: $('#daily-budget').value.trim() || '0',
+    redact_enabled: $('#redact-toggle').checked,
+    redact_patterns: [...document.querySelectorAll('#redact-patterns input[type="checkbox"]:checked')].map(cb => cb.value).join(','),
   };
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings) }).catch(() => {});
 }
@@ -1446,9 +1497,11 @@ function setBusy(busy, statusText) {
     $('#scan-progress-text').textContent = txt;
     prog.style.display = '';
     if (statusText !== 'scanning') $('#scan-progress-pages').innerHTML = '';
+    $('#redact-alert').style.display = 'none';
   } else {
     prog.style.display = 'none';
     $('#scan-progress-pages').innerHTML = '';
+    $('#redact-alert').style.display = 'none';
   }
 }
 function updateScanProgress(job) {
@@ -1468,6 +1521,16 @@ function updateScanProgress(job) {
   } else if (job.status === 'analyzing') {
     const n = job.pages_scanned || 0;
     if (n > 0) textEl.textContent = 'Analyzing ' + n + ' page' + (n > 1 ? 's' : '') + ' with AI...';
+  }
+  // Show redaction alert if sensitive data was found
+  const alertEl = $('#redact-alert');
+  if (job.redaction && job.redaction.count > 0) {
+    const types = job.redaction.types.join(', ');
+    alertEl.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+      '<span>Sensitive data detected (' + types + ') \u2014 <strong>' + job.redaction.count + ' region(s) redacted</strong> before sending to AI</span>';
+    alertEl.style.display = '';
+  } else {
+    alertEl.style.display = 'none';
   }
 }
 
