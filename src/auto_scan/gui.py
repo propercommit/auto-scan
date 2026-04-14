@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import webbrowser
 from datetime import datetime
@@ -30,7 +31,6 @@ state = {
 def _log(msg: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     state["logs"].append(f"[{ts}] {msg}")
-    # Keep last 200 entries
     if len(state["logs"]) > 200:
         state["logs"] = state["logs"][-200:]
 
@@ -44,6 +44,50 @@ def _get_config(**overrides) -> Config:
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/api/config")
+def api_config():
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return jsonify({"has_api_key": has_key})
+
+
+@app.route("/api/save-key", methods=["POST"])
+def api_save_key():
+    data = request.json or {}
+    key = data.get("key", "").strip()
+
+    if not key:
+        return jsonify({"ok": False, "error": "API key cannot be empty"}), 400
+
+    # Find .env file
+    env_path = None
+    for candidate in [Path(".env"), Path(__file__).resolve().parents[2] / ".env"]:
+        if candidate.exists():
+            env_path = candidate
+            break
+    if env_path is None:
+        env_path = Path(".env")
+
+    # Update or create .env
+    if env_path.exists():
+        content = env_path.read_text()
+        lines = content.splitlines()
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith("ANTHROPIC_API_KEY="):
+                lines[i] = f"ANTHROPIC_API_KEY={key}"
+                found = True
+                break
+        if not found:
+            lines.append(f"ANTHROPIC_API_KEY={key}")
+        env_path.write_text("\n".join(lines) + "\n")
+    else:
+        env_path.write_text(f"ANTHROPIC_API_KEY={key}\n")
+
+    os.environ["ANTHROPIC_API_KEY"] = key
+    _log("API key saved and loaded")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/connect", methods=["POST"])
@@ -107,7 +151,6 @@ def api_scan():
 
         config = _get_config(**overrides)
 
-        # Connect if needed
         info = state.get("scanner_info")
         if not info:
             if config.scanner_ip:
@@ -216,6 +259,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   @keyframes spin { to { transform: rotate(360deg); } }
   .busy .spinner { display: inline-block; }
   .output-path { margin-top: 10px; padding: 8px 12px; background: #d1e7dd; border-radius: 6px; font-size: 13px; word-break: break-all; }
+  /* Modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: #fff; border-radius: 14px; padding: 28px; width: 480px; max-width: 90vw; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+  .modal h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; color: #212529; text-transform: none; letter-spacing: 0; }
+  .modal p { font-size: 14px; color: var(--gray); margin-bottom: 16px; line-height: 1.6; }
+  .modal a { color: var(--primary); }
+  .modal input[type="password"] { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; font-family: var(--mono); margin-bottom: 6px; }
+  .modal input[type="password"]:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(13,110,253,.15); }
+  .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  .modal-btns .btn { width: auto; }
+  .modal-error { color: var(--red); font-size: 13px; min-height: 20px; }
 </style>
 </head>
 <body>
@@ -302,15 +357,81 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- API Key Modal -->
+<div class="modal-overlay" id="api-key-modal">
+  <div class="modal">
+    <h2>Anthropic API Key Required</h2>
+    <p>An API key is needed for AI document classification.<br>
+       Get one at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a></p>
+    <label for="api-key-input">API Key</label>
+    <input type="password" id="api-key-input" placeholder="sk-ant-...">
+    <div class="modal-error" id="api-key-error"></div>
+    <div class="modal-btns">
+      <button class="btn btn-secondary" onclick="closeModal()">Skip</button>
+      <button class="btn btn-primary" onclick="saveApiKey()">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
-const $$ = s => document.querySelectorAll(s);
 
-// Set default output dir
-fetch('/api/logs').then(r => r.json()).then(() => {
+// Init: check API key and show modal if missing
+(async function init() {
   if (!$('#output-dir').value) {
     $('#output-dir').value = '~/Documents/Scans';
   }
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    if (!data.has_api_key) {
+      $('#api-key-modal').classList.add('active');
+      $('#api-key-input').focus();
+    }
+  } catch(e) {}
+  refreshLog();
+})();
+
+// Modal functions
+function closeModal() {
+  $('#api-key-modal').classList.remove('active');
+}
+
+async function saveApiKey() {
+  const key = $('#api-key-input').value.trim();
+  const err = $('#api-key-error');
+
+  if (!key) {
+    err.textContent = 'Please enter an API key.';
+    return;
+  }
+  if (!key.startsWith('sk-ant-')) {
+    err.textContent = 'Key should start with sk-ant-...';
+    return;
+  }
+
+  err.textContent = 'Saving...';
+  try {
+    const res = await fetch('/api/save-key', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      closeModal();
+      refreshLog();
+    } else {
+      err.textContent = data.error || 'Failed to save.';
+    }
+  } catch(e) {
+    err.textContent = 'Network error: ' + e.message;
+  }
+}
+
+// Handle Enter key in modal
+$('#api-key-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') saveApiKey();
 });
 
 function getSource() {
@@ -343,16 +464,16 @@ async function connect() {
     });
     const data = await res.json();
     if (data.ok) {
-      st.textContent = `${data.name} — ${data.state}`;
+      st.textContent = data.name + ' \u2014 ' + data.state;
       st.className = 'status connected';
       $('#btn-classify').disabled = false;
       $('#btn-scan').disabled = false;
     } else {
-      st.textContent = `Error: ${data.error}`;
+      st.textContent = 'Error: ' + data.error;
       st.className = 'status error';
     }
   } catch(e) {
-    st.textContent = `Connection failed: ${e.message}`;
+    st.textContent = 'Connection failed: ' + e.message;
     st.className = 'status error';
   }
   refreshLog();
@@ -417,9 +538,7 @@ async function refreshLog() {
   } catch(e) {}
 }
 
-// Poll logs every 2 seconds during operations
 setInterval(refreshLog, 2000);
-refreshLog();
 </script>
 </body>
 </html>"""
@@ -434,7 +553,6 @@ def main() -> None:
     except RuntimeError:
         _log("Warning: No ANTHROPIC_API_KEY found. Set it in .env for AI classification.")
 
-    # Open browser after a short delay
     def open_browser():
         import time
         time.sleep(1)
