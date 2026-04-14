@@ -541,6 +541,10 @@ def _run_scan_job(data: dict, mode: str):
             state["job"] = {"status": "scanning"}
         images, config = _do_scan(data)
 
+        # Store images early so they're available for preview endpoints
+        with _state_lock:
+            state["pending_images"] = images
+
         # Duplicate check
         prev = _check_duplicate(images, config)
         if prev:
@@ -1240,10 +1244,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .lightbox.active { display: flex; }
   .lightbox img { max-width: min(92vw, 1200px); max-height: 85vh; border-radius: var(--radius); box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; }
   .lightbox-label { color: #fff; font-size: 15px; font-weight: 600; margin-top: 12px; }
-  .redact-preview-split { display: flex; gap: 16px; align-items: flex-start; max-width: 95vw; }
+  .redact-preview-split { display: flex; gap: 20px; align-items: flex-start; max-width: 95vw; width: 95vw; }
   .redact-preview-pane { flex: 1; text-align: center; min-width: 0; }
-  .redact-preview-pane img { max-width: 100%; max-height: 70vh; border-radius: 4px; border: 2px solid rgba(255,255,255,.15); }
+  .redact-preview-pane img { max-width: 100%; max-height: 80vh; border-radius: 4px; border: 2px solid rgba(255,255,255,.15); cursor: pointer; transition: opacity .2s; }
+  .redact-preview-pane img:hover { opacity: .85; }
   .redact-preview-label { color: rgba(255,255,255,.7); font-size: 13px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
+  .redact-preview-pane img.zoomed { position: fixed; inset: 0; max-width: 100vw; max-height: 100vh; width: auto; height: auto; margin: auto; z-index: 10001; border: none; border-radius: 0; object-fit: contain; background: rgba(0,0,0,.95); padding: 10px; }
   .lightbox-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(255,255,255,.15); border: none; color: #fff; font-size: 32px; width: 48px; height: 48px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background var(--transition); }
   .lightbox-nav:hover { background: rgba(255,255,255,.3); }
   .lightbox-nav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
@@ -2925,6 +2931,27 @@ function redactPreviewNav(dir) {
 }
 
 $('#redact-preview').addEventListener('click', e => { if (e.target === $('#redact-preview')) closeRedactPreview(); });
+
+// Click image to zoom fullscreen, click again to unzoom
+document.querySelectorAll('#redact-preview .redact-preview-pane img').forEach(img => {
+  img.addEventListener('click', e => {
+    e.stopPropagation();
+    if (img.classList.contains('zoomed')) {
+      img.classList.remove('zoomed');
+    } else {
+      // Unzoom any other zoomed image first
+      document.querySelectorAll('#redact-preview img.zoomed').forEach(z => z.classList.remove('zoomed'));
+      img.classList.add('zoomed');
+    }
+  });
+});
+// Escape also unzooms
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const zoomed = document.querySelector('#redact-preview img.zoomed');
+    if (zoomed) { zoomed.classList.remove('zoomed'); e.stopImmediatePropagation(); }
+  }
+}, true);
 
 // Click lightbox background to close (but not on image or buttons)
 $('#lightbox').addEventListener('click', e => { if (e.target === $('#lightbox')) closeLightbox(); });
