@@ -556,77 +556,95 @@ def _run_scan_job(data: dict, mode: str):
                 }
             return
 
-        # ── Privacy check: run local OCR, redact, pause for confirmation ──
+        # ── Privacy gate: ALWAYS require explicit user confirmation ──────
+        # unless reckless mode is on. This is the ONLY code path to AI.
+        import time as _time
         page_redactions = {}  # tracks which pages had redactions (1-indexed)
-        if not redact:
-            if reckless:
-                _log("OCR privacy check: skipped (reckless mode)")
+
+        if reckless:
+            _log("OCR privacy check: skipped (reckless mode)")
+        else:
+            # Run OCR redaction if enabled
+            redaction_info = {"status": "disabled"}
+            if redact:
+                from auto_scan.redactor import redact_image
+
+                with _state_lock:
+                    state["job"]["status"] = "checking_privacy"
+                _log(f"OCR privacy check: scanning {len(images)} page(s)...")
+
+                t0 = _time.monotonic()
+                total_redactions = 0
+                all_redacted_types = set()
+                redaction_skipped = False
+                skip_reason = ""
+                redacted_previews = {}  # page (1-indexed) -> redacted JPEG bytes
+                for idx, img_data in enumerate(images):
+                    r = redact_image(img_data, enabled_patterns=redact_pats)
+                    total_redactions += r.redaction_count
+                    all_redacted_types.update(r.redacted_types)
+                    if r.redaction_count > 0:
+                        page_redactions[idx + 1] = {"count": r.redaction_count, "types": r.redacted_types}
+                        redacted_previews[idx + 1] = r.redacted_image
+                    if r.skipped:
+                        redaction_skipped = True
+                        skip_reason = r.skip_reason
+                elapsed = _time.monotonic() - t0
+
+                if redaction_skipped:
+                    _log(f"OCR privacy check: SKIPPED — {skip_reason}")
+                    redaction_info = {"status": "skipped", "reason": skip_reason}
+                elif total_redactions > 0:
+                    types_str = ", ".join(sorted(all_redacted_types))
+                    _log(f"OCR privacy check: {total_redactions} region(s) redacted [{types_str}] in {elapsed:.1f}s")
+                    for pg, info in sorted(page_redactions.items()):
+                        _log(f"  Page {pg}: {info['count']} region(s) [{', '.join(info['types'])}]")
+                    redaction_info = {
+                        "status": "redacted",
+                        "count": total_redactions,
+                        "types": sorted(all_redacted_types),
+                    }
+                else:
+                    _log(f"OCR privacy check: clean — no sensitive data found ({elapsed:.1f}s)")
+                    redaction_info = {"status": "clean"}
+
+                with _state_lock:
+                    state["_redacted_previews"] = redacted_previews
             else:
-                _log("OCR privacy check: disabled in settings")
-        if redact and not reckless:
-            import time as _time
-            from auto_scan.redactor import redact_image
+                _log("OCR privacy check: redaction disabled in settings")
+                redaction_info = {"status": "skipped", "reason": "Redaction is disabled in settings. Enable it to scan for sensitive data."}
 
-            with _state_lock:
-                state["job"]["status"] = "checking_privacy"
-            _log(f"OCR privacy check: scanning {len(images)} page(s)...")
-
-            t0 = _time.monotonic()
-            total_redactions = 0
-            all_redacted_types = set()
-            redaction_skipped = False
-            skip_reason = ""
-            redacted_previews = {}  # page (1-indexed) -> redacted JPEG bytes
-            for idx, img_data in enumerate(images):
-                r = redact_image(img_data, enabled_patterns=redact_pats)
-                total_redactions += r.redaction_count
-                all_redacted_types.update(r.redacted_types)
-                if r.redaction_count > 0:
-                    page_redactions[idx + 1] = {"count": r.redaction_count, "types": r.redacted_types}
-                    redacted_previews[idx + 1] = r.redacted_image
-                if r.skipped:
-                    redaction_skipped = True
-                    skip_reason = r.skip_reason
-            elapsed = _time.monotonic() - t0
-
-            # Build redaction report and pause for user confirmation
-            if redaction_skipped:
-                _log(f"OCR privacy check: SKIPPED — {skip_reason}")
-                redaction_info = {"status": "skipped", "reason": skip_reason}
-            elif total_redactions > 0:
-                types_str = ", ".join(sorted(all_redacted_types))
-                _log(f"OCR privacy check: {total_redactions} region(s) redacted [{types_str}] in {elapsed:.1f}s")
-                for pg, info in sorted(page_redactions.items()):
-                    _log(f"  Page {pg}: {info['count']} region(s) [{', '.join(info['types'])}]")
-                redaction_info = {
-                    "status": "redacted",
-                    "count": total_redactions,
-                    "types": sorted(all_redacted_types),
-                }
-            else:
-                _log(f"OCR privacy check: clean — no sensitive data found ({elapsed:.1f}s)")
-                redaction_info = {"status": "clean"}
-
+            # ── MANDATORY confirmation gate — blocks until user clicks confirm ──
             with _state_lock:
                 state["job"]["status"] = "confirm_send"
                 state["job"]["redaction"] = redaction_info
                 state["job"]["page_redactions"] = page_redactions
-                state["_redacted_previews"] = redacted_previews
 
-            # Wait for user to confirm or cancel
-            _log("Waiting for user confirmation...")
+            _log("Waiting for explicit user confirmation before sending to AI...")
+            confirmed = False
             for _ in range(600):  # 10 min max wait
                 _time.sleep(1)
                 with _state_lock:
                     if state["job"].get("user_confirmed"):
+                        confirmed = True
                         break
                     if state["job"].get("user_cancelled"):
-                        _log("Cancelled by user — documents not sent to AI")
+                        _log("Cancelled by user — documents NOT sent to AI")
                         state["job"] = {
                             "status": "error",
                             "result": {"ok": False, "error": "Cancelled: documents not sent to AI."},
                         }
                         return
+
+            if not confirmed:
+                _log("Timed out waiting for confirmation — documents NOT sent to AI")
+                with _state_lock:
+                    state["job"] = {
+                        "status": "error",
+                        "result": {"ok": False, "error": "Timed out: no confirmation received. Documents were not sent to AI."},
+                    }
+                return
+
             _log("User confirmed — proceeding to AI analysis")
 
         if mode == "auto":
