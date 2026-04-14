@@ -304,9 +304,13 @@ def api_scan_assisted():
 
 @app.route("/api/save-classified", methods=["POST"])
 def api_save_classified():
-    """Save pending scanned images with the user's chosen category."""
+    """Save pending scanned images with the user's chosen categories."""
     data = request.json or {}
-    category = data.get("category", "other")
+    categories = data.get("categories", [])
+    if not categories:
+        # Fallback for single category
+        cat = data.get("category", "other")
+        categories = [cat] if cat else ["other"]
     filename = data.get("filename", "")
 
     images = state.get("pending_images")
@@ -316,7 +320,6 @@ def api_save_classified():
         return jsonify({"ok": False, "error": "No pending scan to save."}), 400
 
     try:
-        doc_info.category = category
         if filename:
             doc_info.filename = filename
 
@@ -324,13 +327,23 @@ def api_save_classified():
             **({"output_dir": data["output_dir"]} if data.get("output_dir") else {}),
         )
 
-        output_path = save_document(images, doc_info, config)
-        _log(f"Saved as {category}: {output_path}")
+        saved_paths = []
+        for cat in categories:
+            doc_info.category = cat
+            output_path = save_document(images, doc_info, config)
+            saved_paths.append(str(output_path))
+            _log(f"Saved as {cat}: {output_path}")
 
         state["pending_images"] = None
         state["pending_doc_info"] = None
 
-        return jsonify({"ok": True, "output_path": str(output_path), "category": category})
+        return jsonify({
+            "ok": True,
+            "output_paths": saved_paths,
+            "output_path": saved_paths[0],
+            "categories": categories,
+            "category": categories[0],
+        })
     except Exception as e:
         _log(f"Error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -541,7 +554,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const $ = s => document.querySelector(s);
 let currentMode = 'auto';
-let selectedCategory = null;
+let selectedCategories = new Set();
 
 (async function init() {
   if (!$('#output-dir').value) $('#output-dir').value = '~/Documents/Scans';
@@ -654,15 +667,15 @@ function showClassifyModal(data) {
   $('#classify-img').src = 'data:image/jpeg;base64,' + data.preview;
   $('#classify-summary').innerHTML = '<strong>' + (data.summary || '') + '</strong><br>Date: ' + (data.date || 'Unknown');
   $('#classify-fn').value = data.filename || '';
-  selectedCategory = data.category;
+  selectedCategories = new Set([data.category]);
 
   const suggestedEl = $('#suggested-tags');
   suggestedEl.innerHTML = '';
   (data.suggested_categories || []).forEach(cat => {
     const btn = document.createElement('button');
-    btn.className = 'tag-btn suggested' + (cat === selectedCategory ? ' selected' : '');
+    btn.className = 'tag-btn suggested' + (selectedCategories.has(cat) ? ' selected' : '');
     btn.textContent = cat;
-    btn.onclick = () => selectCategory(cat);
+    btn.onclick = () => toggleCategory(cat);
     suggestedEl.appendChild(btn);
   });
 
@@ -673,31 +686,51 @@ function showClassifyModal(data) {
     const btn = document.createElement('button');
     btn.className = 'tag-btn';
     btn.textContent = cat;
-    btn.onclick = () => selectCategory(cat);
+    btn.onclick = () => toggleCategory(cat);
     allEl.appendChild(btn);
   });
 
+  updateSelectedCount();
   $('#classify-modal').classList.add('active');
 }
 
-function selectCategory(cat) {
-  selectedCategory = cat;
-  document.querySelectorAll('.tag-btn').forEach(btn => btn.classList.toggle('selected', btn.textContent === cat));
-  const fn = $('#classify-fn').value;
-  const parts = fn.split('_');
-  if (parts.length >= 3) { parts[1] = cat; $('#classify-fn').value = parts.join('_'); }
+function toggleCategory(cat) {
+  if (selectedCategories.has(cat)) {
+    selectedCategories.delete(cat);
+  } else {
+    selectedCategories.add(cat);
+  }
+  document.querySelectorAll('.tag-btn').forEach(btn => btn.classList.toggle('selected', selectedCategories.has(btn.textContent)));
+  // Update filename with the first selected category
+  if (selectedCategories.size > 0) {
+    const first = [...selectedCategories][0];
+    const fn = $('#classify-fn').value;
+    const parts = fn.split('_');
+    if (parts.length >= 3) { parts[1] = first; $('#classify-fn').value = parts.join('_'); }
+  }
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  const n = selectedCategories.size;
+  const label = n === 0 ? 'Save' : n === 1 ? 'Save (1 category)' : 'Save (' + n + ' categories)';
+  $('#btn-save-classify').textContent = label;
 }
 
 function cancelClassify() { $('#classify-modal').classList.remove('active'); }
 
 async function saveClassified() {
-  if (!selectedCategory) { alert('Please select a category.'); return; }
+  if (selectedCategories.size === 0) { alert('Please select at least one category.'); return; }
   $('#btn-save-classify').disabled = true;
   try {
-    const res = await fetch('/api/save-classified', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ category: selectedCategory, filename: $('#classify-fn').value, output_dir: $('#output-dir').value }) });
+    const res = await fetch('/api/save-classified', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ categories: [...selectedCategories], filename: $('#classify-fn').value, output_dir: $('#output-dir').value }) });
     const data = await res.json();
-    if (data.ok) { $('#classify-modal').classList.remove('active'); showResult(data.category, $('#classify-fn').value, '', '--', data.output_path); }
-    else alert('Error: ' + data.error);
+    if (data.ok) {
+      $('#classify-modal').classList.remove('active');
+      const cats = data.categories.join(', ');
+      const paths = data.output_paths.join('\n');
+      showResult(cats, $('#classify-fn').value, '', '--', paths);
+    } else alert('Error: ' + data.error);
   } catch(e) { alert('Failed: ' + e.message); }
   $('#btn-save-classify').disabled = false;
   refreshLog();
