@@ -62,6 +62,23 @@ pip install -e . --quiet
 
 success "All dependencies installed"
 
+# ── Install Tesseract OCR (for sensitive data redaction) ────────────
+info "Checking for Tesseract OCR (needed for sensitive data redaction)..."
+
+if command -v tesseract &>/dev/null; then
+    success "Tesseract already installed ($(tesseract --version 2>&1 | head -1))"
+else
+    if command -v brew &>/dev/null; then
+        info "Installing Tesseract via Homebrew..."
+        brew install tesseract --quiet
+        success "Tesseract installed"
+    else
+        warn "Tesseract OCR not found. Sensitive data redaction won't work without it."
+        echo "  Install it with: brew install tesseract"
+        echo "  Or download from: https://github.com/tesseract-ocr/tesseract"
+    fi
+fi
+
 # ── Set up configuration ─────────────────────────────────────────────
 if [ ! -f ".env" ]; then
     info "Setting up configuration..."
