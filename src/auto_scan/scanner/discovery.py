@@ -21,7 +21,8 @@ class ScannerInfo:
     @property
     def base_url(self) -> str:
         scheme = "https" if self.port == 443 else "http"
-        return f"{scheme}://{self.ip}:{self.port}{self.root_path}"
+        path = self.root_path if self.root_path.startswith("/") else f"/{self.root_path}"
+        return f"{scheme}://{self.ip}:{self.port}{path}"
 
 
 class _ScannerListener:
