@@ -2,7 +2,7 @@
 name = "auto-scan"
 version = "0.1.0"
 description = "Scan documents from Canon GX7050 and auto-classify with AI"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "httpx",
     "zeroconf",
@@ -14,10 +14,14 @@ dependencies = [
 
 [project.scripts]
 auto-scan = "auto_scan.cli:main"
+auto-scan-gui = "auto_scan.gui:main"
+
+[project.optional-dependencies]
+gui = ["customtkinter"]
 
 [build-system]
 requires = ["setuptools>=64"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
