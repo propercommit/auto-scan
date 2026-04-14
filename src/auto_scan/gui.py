@@ -159,11 +159,15 @@ def api_save_settings():
 
 @app.route("/api/test-ocr", methods=["POST"])
 def api_test_ocr():
-    """Generate a test image with fake sensitive data and run OCR + redaction on it."""
+    """Pick 3 random realistic test documents and run OCR + redaction on each."""
     import shutil
     import time
 
-    result = {"tesseract": False, "pytesseract": False, "ocr_works": False, "redaction_works": False, "details": ""}
+    result = {
+        "tesseract": False, "pytesseract": False,
+        "ocr_works": False, "redaction_works": False,
+        "details": "", "files": [],
+    }
 
     # Check tesseract binary
     if not shutil.which("tesseract"):
@@ -179,28 +183,18 @@ def api_test_ocr():
         return jsonify(result)
     result["pytesseract"] = True
 
-    # Generate a test image with known sensitive data
+    # Pick 3 random test documents from the 14 available
     try:
-        from PIL import Image, ImageDraw, ImageFont
-
-        img = Image.new("RGB", (600, 200), "white")
-        draw = ImageDraw.Draw(img)
-        # Use default font (always available)
-        draw.text((20, 20), "SSN: 123-45-6789", fill="black")
-        draw.text((20, 60), "IBAN: CH93 0076 2011 6238 5295 7", fill="black")
-        draw.text((20, 100), "Card: 4111 1111 1111 1111", fill="black")
-        draw.text((20, 140), "This is a normal line of text.", fill="black")
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=95)
-        test_bytes = buf.getvalue()
+        from auto_scan.test_documents import pick_random
+        test_docs = pick_random(3)
     except Exception as e:
-        result["details"] = f"Failed to create test image: {e}"
+        result["details"] = f"Failed to generate test documents: {e}"
         return jsonify(result)
 
-    # Run OCR to verify it reads text
+    # Verify OCR can read text from the first document
     try:
-        ocr_text = pytesseract.image_to_string(img)
+        first_img = Image.open(io.BytesIO(test_docs[0][0]))
+        ocr_text = pytesseract.image_to_string(first_img)
         if len(ocr_text.strip()) < 5:
             result["details"] = "OCR returned no text. Tesseract may not be configured correctly."
             return jsonify(result)
@@ -209,27 +203,59 @@ def api_test_ocr():
         result["details"] = f"OCR failed: {e}"
         return jsonify(result)
 
-    # Run the full redaction pipeline
-    try:
-        from auto_scan.redactor import redact_image
+    # Run the full redaction pipeline on each test document
+    from auto_scan.redactor import redact_image
 
-        t0 = time.monotonic()
-        r = redact_image(test_bytes, enabled_patterns={"ssn", "iban", "credit_card"})
-        elapsed = time.monotonic() - t0
+    total_found = 0
+    total_expected = 0
+    file_results = []
+    t0 = time.monotonic()
 
-        if r.skipped:
-            result["details"] = f"Redaction skipped: {r.skip_reason}"
-            return jsonify(result)
+    for img_bytes, doc_name, expected_types in test_docs:
+        try:
+            r = redact_image(img_bytes)
+            if r.skipped:
+                file_results.append({
+                    "name": doc_name, "status": "skipped",
+                    "detail": r.skip_reason,
+                })
+                continue
 
-        result["redaction_works"] = r.redaction_count > 0
-        found = ", ".join(r.redacted_types) if r.redacted_types else "none"
-        result["details"] = (
-            f"OCR + redaction working. Found {r.redaction_count} region(s) "
-            f"[{found}] in {elapsed:.1f}s"
-        )
-    except Exception as e:
-        result["details"] = f"Redaction failed: {e}"
+            found_types = set(r.redacted_types)
+            has_sensitive = len(expected_types) > 0
+            detected = r.redaction_count > 0
 
+            if has_sensitive and detected:
+                status = "pass"
+                total_found += r.redaction_count
+            elif not has_sensitive and not detected:
+                status = "pass"
+            elif has_sensitive and not detected:
+                status = "miss"
+            else:
+                status = "extra"  # found something in clean doc (false positive)
+
+            total_expected += len(expected_types)
+            file_results.append({
+                "name": doc_name, "status": status,
+                "count": r.redaction_count,
+                "found": r.redacted_types,
+                "expected": expected_types,
+            })
+        except Exception as e:
+            file_results.append({
+                "name": doc_name, "status": "error",
+                "detail": str(e),
+            })
+
+    elapsed = time.monotonic() - t0
+    result["files"] = file_results
+    passes = sum(1 for f in file_results if f["status"] == "pass")
+    result["redaction_works"] = passes >= 2  # at least 2/3 pass
+    result["details"] = (
+        f"Tested 3 documents in {elapsed:.1f}s: "
+        f"{passes}/3 passed, {total_found} region(s) redacted"
+    )
     return jsonify(result)
 
 
@@ -1668,25 +1694,35 @@ async function testOCR() {
   const btn = $('#btn-test-ocr');
   const result = $('#ocr-test-result');
   btn.disabled = true;
-  btn.textContent = 'Testing...';
-  result.textContent = '';
-  result.style.color = '';
+  btn.textContent = 'Testing 3 random documents...';
+  result.innerHTML = '';
   try {
     const res = await fetch('/api/test-ocr', { method: 'POST' });
     const data = await res.json();
+    let html = '';
+    if (data.files && data.files.length > 0) {
+      html += '<div style="margin-top:6px">';
+      data.files.forEach(f => {
+        const icons = {pass: '\u2705', miss: '\u274c', extra: '\u26a0\ufe0f', skipped: '\u23ed\ufe0f', error: '\u274c'};
+        const icon = icons[f.status] || '';
+        let detail = f.name;
+        if (f.status === 'pass' && f.count > 0) detail += ' \u2014 ' + f.count + ' region(s) [' + (f.found||[]).join(', ') + ']';
+        else if (f.status === 'pass') detail += ' \u2014 clean (correct)';
+        else if (f.status === 'miss') detail += ' \u2014 missed! expected [' + (f.expected||[]).join(', ') + ']';
+        else if (f.detail) detail += ' \u2014 ' + f.detail;
+        html += '<div style="font-size:12px;margin-bottom:3px">' + icon + ' ' + detail + '</div>';
+      });
+      html += '</div>';
+    }
     if (data.redaction_works) {
-      result.style.color = '#16a34a';
-      result.innerHTML = '<strong>All good!</strong> ' + data.details;
+      result.innerHTML = '<strong style="color:#16a34a">All good!</strong> <span style="font-size:12px;color:var(--gray)">' + data.details + '</span>' + html;
     } else if (data.ocr_works) {
-      result.style.color = '#d97706';
-      result.innerHTML = '<strong>OCR works but no patterns matched.</strong> ' + data.details;
+      result.innerHTML = '<strong style="color:#d97706">Partial:</strong> <span style="font-size:12px;color:var(--gray)">' + data.details + '</span>' + html;
     } else {
-      result.style.color = '#dc2626';
-      result.innerHTML = '<strong>Failed:</strong> ' + data.details;
+      result.innerHTML = '<strong style="color:#dc2626">Failed:</strong> <span style="font-size:12px">' + data.details + '</span>' + html;
     }
   } catch(e) {
-    result.style.color = '#dc2626';
-    result.textContent = 'Request failed: ' + e.message;
+    result.innerHTML = '<strong style="color:#dc2626">Request failed:</strong> ' + e.message;
   }
   btn.disabled = false;
   btn.textContent = 'Test OCR';
