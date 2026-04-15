@@ -143,6 +143,188 @@ def _label_page(image_data: bytes, page_num: int, max_dim: int = 1568) -> bytes:
     return buf.getvalue()
 
 
+def _region_histogram_similarity(img_a: Image.Image, img_b: Image.Image,
+                                  top_frac: float, bottom_frac: float) -> float:
+    """Compare a horizontal strip of two pages using color histogram intersection.
+
+    This is sensitive to different colored letterheads, logos, and backgrounds.
+    Returns 0–100 (100 = identical histograms).
+    """
+    def _crop(img: Image.Image) -> Image.Image:
+        w, h = img.size
+        return img.crop((0, int(h * top_frac), w, int(h * bottom_frac)))
+
+    a = _crop(img_a).resize((400, 60)).convert("RGB")
+    b = _crop(img_b).resize((400, 60)).convert("RGB")
+
+    # Build RGB histograms (32 bins per channel)
+    ha = a.histogram()  # 768 values: 256 R + 256 G + 256 B
+    hb = b.histogram()
+
+    # Reduce to 32 bins per channel for robustness
+    def _reduce(hist: list[int], bins: int = 32) -> list[float]:
+        step = 256 // bins
+        reduced = []
+        for ch in range(3):
+            base = ch * 256
+            for b_idx in range(bins):
+                reduced.append(sum(hist[base + b_idx * step : base + (b_idx + 1) * step]))
+            # Normalize to sum to 1
+            total = sum(reduced[-bins:]) or 1
+            for j in range(bins):
+                reduced[-bins + j] /= total
+        return reduced
+
+    ha_r = _reduce(ha)
+    hb_r = _reduce(hb)
+
+    # Histogram intersection (sum of min values) — 1.0 = identical
+    intersection = sum(min(a, b) for a, b in zip(ha_r, hb_r))
+    # 3 channels, each normalized to 1.0 → max intersection = 3.0
+    return round(intersection / 3.0 * 100.0, 1)
+
+
+def _region_pixel_similarity(img_a: Image.Image, img_b: Image.Image,
+                              top_frac: float, bottom_frac: float) -> float:
+    """Compare a strip using pixel-level grayscale difference.
+
+    Catches text/layout differences that histogram can miss.
+    """
+    def _crop(img: Image.Image) -> Image.Image:
+        w, h = img.size
+        return img.crop((0, int(h * top_frac), w, int(h * bottom_frac)))
+
+    a = _crop(img_a).resize((500, 80)).convert("L")
+    b = _crop(img_b).resize((500, 80)).convert("L")
+    px_a, px_b = list(a.getdata()), list(b.getdata())
+    diff = sum(abs(a - b) for a, b in zip(px_a, px_b)) / len(px_a)
+    return round(max(0.0, 100.0 - diff * 100.0 / 80.0), 1)
+
+
+def _page_similarity(img_a: Image.Image, img_b: Image.Image) -> float:
+    """Compare two pages for document boundary detection.
+
+    Combines color histogram similarity (catches different colored headers/logos)
+    with pixel-level comparison (catches text/layout differences).
+    Uses header (top 15%) and footer (bottom 10%) regions.
+    Returns 0–100.
+    """
+    # Color histogram: sensitive to different colored backgrounds, logos
+    h_hist = _region_histogram_similarity(img_a, img_b, 0.0, 0.15)
+    f_hist = _region_histogram_similarity(img_a, img_b, 0.88, 1.0)
+
+    # Pixel-level: catches text and layout differences
+    h_pixel = _region_pixel_similarity(img_a, img_b, 0.0, 0.15)
+    f_pixel = _region_pixel_similarity(img_a, img_b, 0.88, 1.0)
+
+    # Use the MINIMUM of histogram and pixel similarity per region
+    # (either signal detecting a difference is enough)
+    header_sim = min(h_hist, h_pixel)
+    footer_sim = min(f_hist, f_pixel)
+
+    # Header dominates (70%) — it's the strongest document identity signal
+    return round(header_sim * 0.70 + footer_sim * 0.30, 1)
+
+
+def _detect_page_numbers(text: str) -> list[str]:
+    """Extract page numbering patterns from OCR text."""
+    patterns = [
+        r"[Pp]age\s+(\d+)\s+(?:of|/)\s+(\d+)",          # Page 2 of 4
+        r"[Ss]eite\s+(\d+)\s+von\s+(\d+)",               # Seite 2 von 4
+        r"(\d+)\s*/\s*(\d+)",                              # 2/4
+        r"[Pp]\.\s*(\d+)\s*/\s*(\d+)",                    # P. 2/4
+        r"-\s*(\d+)\s*-",                                  # - 2 -
+    ]
+    found = []
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            found.append(m.group(0).strip())
+    return found
+
+
+def _compute_page_hints(images: list[bytes]) -> str:
+    """Pre-process pages locally to produce grouping hints for the AI.
+
+    1. Visual header similarity between consecutive pages
+    2. OCR-detected page numbering patterns
+
+    Returns a formatted hint block to append to the batch prompt.
+    """
+    n = len(images)
+    if n < 2:
+        return ""
+
+    # ── Step 1: Visual similarity (header + footer + logo) ─────────────
+    pil_images = [_open_image(img) for img in images]
+    similarities = []
+    for i in range(n - 1):
+        score = _page_similarity(pil_images[i], pil_images[i + 1])
+        similarities.append((i + 1, i + 2, score))
+
+    header_lines = []
+    # Group consecutive similar pages into runs
+    run_start = 1
+    for i, (p1, p2, score) in enumerate(similarities):
+        if score < 75:
+            # End of a run — report the run and the boundary
+            if p1 > run_start:
+                header_lines.append(
+                    f"  Pages {run_start}\u2013{p1}: Similar layout (likely same document)"
+                )
+            header_lines.append(
+                f"  Pages {p1}\u2192{p2}: DIFFERENT layout ({score:.0f}% match) \u2014 likely document boundary"
+            )
+            run_start = p2
+        elif i == len(similarities) - 1:
+            # Final run
+            if p2 > run_start:
+                header_lines.append(
+                    f"  Pages {run_start}\u2013{p2}: Similar layout (likely same document)"
+                )
+
+    # ── Step 2: OCR page numbering ─────────────────────────────────────
+    page_num_lines = []
+    try:
+        import pytesseract
+        for i, img in enumerate(pil_images):
+            try:
+                # OCR just the top and bottom 15% for speed
+                w, h = img.size
+                regions = [
+                    img.crop((0, 0, w, int(h * 0.15))),
+                    img.crop((0, int(h * 0.85), w, h)),
+                ]
+                text = ""
+                for region in regions:
+                    text += pytesseract.image_to_string(region, timeout=5) + "\n"
+                nums = _detect_page_numbers(text)
+                if nums:
+                    page_num_lines.append(f"  Page {i + 1}: detected \"{nums[0]}\"")
+            except Exception:
+                continue
+    except ImportError:
+        pass  # pytesseract not installed — skip OCR hints
+
+    # ── Build hint block ───────────────────────────────────────────────
+    if not header_lines and not page_num_lines:
+        return ""
+
+    parts = ["\n\n\u2550\u2550\u2550 LOCAL ANALYSIS HINTS (pre-computed by image analysis) \u2550\u2550\u2550"]
+    parts.append("Use these hints alongside your own reading. They may contain errors \u2014 your visual analysis of content takes priority.\n")
+
+    if header_lines:
+        parts.append("HEADER SIMILARITY (pages with matching letterheads/headers):")
+        parts.extend(header_lines)
+        parts.append("")
+
+    if page_num_lines:
+        parts.append("PAGE NUMBERING (detected by OCR on page edges):")
+        parts.extend(page_num_lines)
+        parts.append("")
+
+    return "\n".join(parts)
+
+
 def _maybe_redact(image_data: bytes, redact_enabled: bool, redact_patterns: set[str] | None = None) -> bytes:
     """Optionally redact sensitive information from image before sending to API."""
     if not redact_enabled:
@@ -365,6 +547,12 @@ def analyze_batch(
     print(f"Batch analyzing {len(images)} pages...", file=sys.stderr)
     client = anthropic.Anthropic(api_key=config.api_key, timeout=180.0)
 
+    # Pre-compute local grouping hints (header similarity + OCR page numbers)
+    print("  Computing page grouping hints...", file=sys.stderr)
+    page_hints = _compute_page_hints(images)
+    if page_hints:
+        print(f"  Hints ready ({page_hints.count(chr(10))} lines)", file=sys.stderr)
+
     content: list[dict] = []
     for i, img_data in enumerate(images):
         safe_img = _maybe_redact(img_data, redact, redact_patterns)
@@ -375,14 +563,15 @@ def analyze_batch(
             "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
         })
 
-    content.append({
-        "type": "text",
-        "text": BATCH_ANALYSIS_PROMPT.format(
-            today=date.today().isoformat(),
-            categories=", ".join(ALL_CATEGORIES),
-            num_pages=len(images),
-        ),
-    })
+    prompt_text = BATCH_ANALYSIS_PROMPT.format(
+        today=date.today().isoformat(),
+        categories=", ".join(ALL_CATEGORIES),
+        num_pages=len(images),
+    )
+    if page_hints:
+        prompt_text += page_hints
+
+    content.append({"type": "text", "text": prompt_text})
 
     try:
         message = client.messages.create(
