@@ -1450,8 +1450,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .btn-scan-next { margin-top: 16px; width: 100%; padding: 12px 20px; font-size: 15px; font-weight: 700; }
   .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 200; align-items: center; justify-content: center; flex-direction: column; cursor: pointer; }
   .lightbox.active { display: flex; }
-  .lightbox-img-wrap { position: relative; display: inline-block; }
-  .lightbox-img-wrap img { max-width: min(92vw, 1200px); max-height: 75vh; border-radius: var(--radius); box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; display: block; }
+  .lightbox-img-wrap { position: relative; display: inline-block; overflow: hidden; }
+  .lightbox-img-wrap img { max-width: min(92vw, 1200px); max-height: 75vh; border-radius: var(--radius); box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; display: block; transform-origin: 0 0; cursor: grab; }
+  .lightbox-img-wrap img:active { cursor: grabbing; }
+  .lightbox-img-wrap img.zoomed-in { max-width: none; max-height: none; cursor: grab; }
   .lightbox-toolbar { display: flex; gap: 8px; margin-bottom: 12px; z-index: 2; }
   .lightbox-tool { background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.25); color: #fff; font-size: 14px; font-weight: 600; padding: 6px 14px; border-radius: 6px; cursor: pointer; transition: background var(--transition); font-family: var(--font); }
   .lightbox-tool:hover { background: rgba(255,255,255,.3); }
@@ -1901,6 +1903,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="btn btn-secondary" onclick="lightboxCancelCrop()">Cancel</button>
   </div>
   <div class="lightbox-label" id="lightbox-label"></div>
+  <div class="redact-zoom-hint">Scroll to zoom &middot; Drag to pan &middot; Double-click to reset</div>
 </div>
 
 <!-- Redaction Preview Modal -->
@@ -3243,6 +3246,7 @@ function showLightboxPage() {
   const showTools = batchPages.length > 0 || classifyPageCount > 0;
   $('#lightbox-toolbar').style.display = showTools ? 'flex' : 'none';
   lightboxCancelCrop();
+  if (window._resetLightboxZoom) window._resetLightboxZoom();
 }
 
 function closeLightbox() {
@@ -3483,6 +3487,61 @@ $('#redact-preview').addEventListener('click', e => { if (e.target === $('#redac
     // Double-click to reset
     img.addEventListener('dblclick', e => { e.stopPropagation(); resetZoom(sel); });
   });
+})();
+
+// ── Scroll-zoom + drag-pan for lightbox ────────────────────────────
+(function() {
+  const sel = '#lightbox-img';
+  let lbZoom = { scale: 1, tx: 0, ty: 0, dragging: false, sx: 0, sy: 0 };
+
+  function apply() {
+    const img = $(sel);
+    if (!img) return;
+    img.style.transform = 'translate(' + lbZoom.tx + 'px,' + lbZoom.ty + 'px) scale(' + lbZoom.scale + ')';
+    img.classList.toggle('zoomed-in', lbZoom.scale > 1.05);
+  }
+
+  window._resetLightboxZoom = function() {
+    lbZoom = { scale: 1, tx: 0, ty: 0, dragging: false, sx: 0, sy: 0 };
+    const img = $(sel);
+    if (img) { img.style.transform = ''; img.classList.remove('zoomed-in'); }
+  };
+
+  const wrap = $('#lightbox-img-wrap');
+  if (wrap) {
+    wrap.addEventListener('wheel', e => {
+      if (_cropping) return;
+      e.preventDefault();
+      const img = $(sel);
+      if (!img) return;
+      const rect = img.getBoundingClientRect();
+      const cx = (e.clientX - rect.left) / lbZoom.scale;
+      const cy = (e.clientY - rect.top) / lbZoom.scale;
+      const prev = lbZoom.scale;
+      lbZoom.scale = Math.max(1, Math.min(10, lbZoom.scale * (e.deltaY > 0 ? 0.85 : 1.18)));
+      lbZoom.tx = lbZoom.tx - cx * (lbZoom.scale - prev);
+      lbZoom.ty = lbZoom.ty - cy * (lbZoom.scale - prev);
+      if (lbZoom.scale <= 1) { lbZoom.tx = 0; lbZoom.ty = 0; }
+      apply();
+    }, {passive: false});
+  }
+
+  const img = $(sel);
+  if (img) {
+    img.addEventListener('mousedown', e => {
+      if (lbZoom.scale <= 1 || _cropping) return;
+      e.preventDefault();
+      lbZoom.dragging = true; lbZoom.sx = e.clientX - lbZoom.tx; lbZoom.sy = e.clientY - lbZoom.ty;
+    });
+    window.addEventListener('mousemove', e => {
+      if (!lbZoom.dragging) return;
+      lbZoom.tx = e.clientX - lbZoom.sx;
+      lbZoom.ty = e.clientY - lbZoom.sy;
+      apply();
+    });
+    window.addEventListener('mouseup', () => { lbZoom.dragging = false; });
+    img.addEventListener('dblclick', e => { e.stopPropagation(); window._resetLightboxZoom(); });
+  }
 })();
 
 // Click lightbox background to close (but not on image or buttons)
