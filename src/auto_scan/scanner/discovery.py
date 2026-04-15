@@ -165,11 +165,44 @@ def discover_all_scanners(timeout: float = 5.0) -> list[ScannerInfo]:
     return listener.all_scanners
 
 
-def scanner_info_from_ip(ip: str, port: int = 443) -> ScannerInfo:
+def scanner_info_from_ip(ip: str, port: int | None = None) -> ScannerInfo:
     """Construct ScannerInfo directly from an IP address (skip discovery).
 
     Used when the user sets SCANNER_IP in .env — bypasses mDNS entirely,
     which is faster and works across subnets where mDNS may not reach.
-    Default port 443 assumes eSCLS (TLS); override for plain HTTP scanners.
+
+    If *port* is ``None`` (the default), probes HTTPS 443 first, then
+    HTTP 80 and 8080 to find a reachable eSCL endpoint.  This avoids
+    TLS handshake failures on scanners that only support plain HTTP.
     """
-    return ScannerInfo(ip=ip, port=port, root_path="/eSCL", name=f"Scanner@{ip}")
+    if port is not None:
+        return ScannerInfo(ip=ip, port=port, root_path="/eSCL", name=f"Scanner@{ip}")
+
+    # Probe common eSCL ports to pick the right scheme automatically.
+    import httpx, ssl
+    from auto_scan.scanner.escl import _scanner_ssl_context
+
+    for try_port, scheme, verify in [
+        (443, "https", _scanner_ssl_context()),
+        (80, "http", False),
+        (8080, "http", False),
+    ]:
+        url = f"{scheme}://{ip}:{try_port}/eSCL/ScannerStatus"
+        try:
+            with httpx.Client(verify=verify, timeout=5.0) as c:
+                resp = c.get(url)
+                if resp.status_code < 500:
+                    print(
+                        f"  Scanner reachable at {scheme}://{ip}:{try_port}",
+                        file=sys.stderr,
+                    )
+                    return ScannerInfo(
+                        ip=ip, port=try_port, root_path="/eSCL",
+                        name=f"Scanner@{ip}",
+                    )
+        except Exception:
+            continue
+
+    # None of the probes succeeded — default to 443 and let the ESCLClient
+    # handle the fallback with a more detailed error.
+    return ScannerInfo(ip=ip, port=443, root_path="/eSCL", name=f"Scanner@{ip}")

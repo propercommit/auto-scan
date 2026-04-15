@@ -1,14 +1,19 @@
 """Tests for the eSCL protocol client (XML generation, URL handling, format conversion)."""
 
+import ssl
 import xml.etree.ElementTree as ET
+from unittest.mock import patch, MagicMock
 
+import httpx
 import pytest
 
 from auto_scan.scanner.escl import (
+    ESCLClient,
     ScanSettings,
     ScannerCapabilities,
     ScannerStatus,
     _ensure_jpeg,
+    _scanner_ssl_context,
     PWG_NS,
     SCAN_NS,
 )
@@ -137,3 +142,122 @@ class TestScannerDataclasses:
     def test_scanner_status_no_adf(self):
         status = ScannerStatus(state="Idle", adf_state=None)
         assert status.adf_state is None
+
+
+# ── SSL context ──────────────────────────────────────────────────
+
+class TestScannerSslContext:
+    """Verify the permissive TLS context for scanner connections."""
+
+    def test_returns_ssl_context(self):
+        ctx = _scanner_ssl_context()
+        assert isinstance(ctx, ssl.SSLContext)
+
+    def test_no_cert_verification(self):
+        ctx = _scanner_ssl_context()
+        assert ctx.verify_mode == ssl.CERT_NONE
+
+    def test_no_hostname_check(self):
+        ctx = _scanner_ssl_context()
+        assert ctx.check_hostname is False
+
+
+# ── ESCLClient connection fallback ───────────────────────────────
+
+class TestESCLClientFallback:
+    """Test HTTPS-to-HTTP fallback on TLS handshake failure."""
+
+    def test_https_success_no_fallback(self):
+        """When HTTPS works, no fallback occurs."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        with patch("auto_scan.scanner.escl.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            mock_client.get.return_value = mock_resp
+            MockClient.return_value = mock_client
+
+            client = ESCLClient("https://192.168.1.50:443/eSCL")
+            assert client.base_url == "https://192.168.1.50:443/eSCL"
+            client.close()
+
+    def test_ssl_failure_falls_back_to_http(self):
+        """TLS handshake failure should try plain HTTP."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        call_count = 0
+
+        def mock_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if url.startswith("https"):
+                raise ssl.SSLError("SSLV3_ALERT_HANDSHAKE_FAILURE")
+            return mock_resp
+
+        with patch("auto_scan.scanner.escl.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            mock_client.get.side_effect = mock_get
+            MockClient.return_value = mock_client
+
+            client = ESCLClient("https://192.168.1.50:443/eSCL")
+            # Should have fallen back to HTTP
+            assert client.base_url.startswith("http://")
+            client.close()
+
+    def test_connect_error_falls_back_to_http(self):
+        """Connection error on HTTPS should try HTTP ports."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        def mock_get(url, **kwargs):
+            if url.startswith("https"):
+                raise httpx.ConnectError("Connection refused")
+            return mock_resp
+
+        with patch("auto_scan.scanner.escl.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            mock_client.get.side_effect = mock_get
+            MockClient.return_value = mock_client
+
+            client = ESCLClient("https://192.168.1.50:443/eSCL")
+            assert client.base_url.startswith("http://")
+            client.close()
+
+    def test_http_url_no_fallback_needed(self):
+        """Plain HTTP URLs don't attempt TLS at all."""
+        with patch("auto_scan.scanner.escl.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            MockClient.return_value = mock_client
+
+            client = ESCLClient("http://192.168.1.50:80/eSCL")
+            assert client.base_url == "http://192.168.1.50:80/eSCL"
+            # Should not have probed anything (no get calls for connection test)
+            mock_client.get.assert_not_called()
+            client.close()
+
+    def test_all_ports_fail_returns_client_anyway(self):
+        """When nothing responds, still returns a client for better error messages later."""
+        with patch("auto_scan.scanner.escl.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            mock_client.get.side_effect = httpx.ConnectError("refused")
+            MockClient.return_value = mock_client
+
+            client = ESCLClient("https://192.168.1.50:443/eSCL")
+            assert client._client is not None
+            client.close()
+
+    def test_https_uses_scanner_ssl_context(self):
+        """HTTPS connections should use the permissive SSL context."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        with patch("auto_scan.scanner.escl.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            mock_client.get.return_value = mock_resp
+            MockClient.return_value = mock_client
+
+            ESCLClient("https://192.168.1.50:443/eSCL").close()
+
+            # First Client() call should pass an ssl.SSLContext, not just verify=False
+            first_call_kwargs = MockClient.call_args_list[0][1]
+            assert isinstance(first_call_kwargs["verify"], ssl.SSLContext)

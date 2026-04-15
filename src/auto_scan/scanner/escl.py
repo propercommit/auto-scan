@@ -9,6 +9,7 @@ The workflow is: POST /ScanJobs -> GET /NextDocument in a loop -> DELETE job.
 
 from __future__ import annotations
 
+import ssl
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -20,6 +21,36 @@ import httpx
 from PIL import Image
 
 from auto_scan import ScanError, ScannerBusyError
+
+
+def _scanner_ssl_context() -> ssl.SSLContext:
+    """Create a permissive TLS context for scanner connections.
+
+    Network scanners (Canon, HP, Brother, etc.) typically ship with
+    self-signed certs *and* legacy TLS stacks that only support older
+    cipher suites.  Python's default context rejects these even with
+    ``verify=False``, causing ``SSLV3_ALERT_HANDSHAKE_FAILURE``.
+
+    This context disables certificate validation *and* lowers the
+    OpenSSL security level so legacy ciphers are accepted.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    # SECLEVEL=1 allows 1024-bit DH params and older cipher suites that
+    # embedded scanner firmware commonly requires.
+    try:
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+    except ssl.SSLError:
+        # Fallback: some OpenSSL builds don't support @SECLEVEL
+        ctx.set_ciphers("DEFAULT")
+    # Allow TLS 1.0+ — some older scanner firmware doesn't speak TLS 1.2
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1
+    except (AttributeError, ValueError):
+        # Python < 3.10 or system OpenSSL doesn't support setting this
+        pass
+    return ctx
 
 # ── XML namespace constants ──────────────────────────────────────────
 # eSCL uses two XML namespaces: one from the PWG standard (scanner-agnostic),
@@ -126,17 +157,73 @@ class ESCLClient:
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
-        # TLS verification disabled: virtually all network scanners ship with
-        # self-signed certs and there is no practical CA chain to validate.
-        # Trade-off: MITM is possible on the local network, but requiring
-        # valid certs would make the tool unusable with most scanners.
-        self._client = httpx.Client(verify=False, timeout=30.0)
-        if base_url.startswith("https"):
-            print(
-                "  Note: TLS certificate verification is disabled for scanner connection "
-                "(self-signed certs are common on network scanners).",
-                file=sys.stderr,
-            )
+        self._client = self._create_client()
+
+    def _create_client(self) -> httpx.Client:
+        """Create an HTTP client, with automatic HTTPS→HTTP fallback.
+
+        Tries HTTPS with a permissive TLS context first.  If the TLS
+        handshake fails (common with embedded scanner firmware), falls
+        back to plain HTTP on the standard eSCL ports.
+        """
+        if self.base_url.startswith("https"):
+            client = httpx.Client(verify=_scanner_ssl_context(), timeout=30.0)
+            try:
+                client.get(f"{self.base_url}/ScannerStatus", timeout=10.0)
+                print(
+                    "  Connected via HTTPS (TLS certificate verification disabled "
+                    "— self-signed certs are expected on scanners).",
+                    file=sys.stderr,
+                )
+                return client
+            except (ssl.SSLError, httpx.ConnectError) as exc:
+                client.close()
+                print(
+                    f"  HTTPS handshake failed ({exc.__class__.__name__}), "
+                    "falling back to HTTP...",
+                    file=sys.stderr,
+                )
+                # Try plain HTTP on common eSCL ports
+                return self._fallback_to_http()
+            except httpx.HTTPError:
+                # Connected via TLS but got an HTTP-level error — TLS works,
+                # the scanner just returned an error status (still usable).
+                return client
+
+        # Already plain HTTP
+        return httpx.Client(verify=False, timeout=30.0)
+
+    def _fallback_to_http(self) -> httpx.Client:
+        """Try plain HTTP on common eSCL ports (80, 8080, 443)."""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.base_url)
+        host = parsed.hostname
+        path = parsed.path or "/eSCL"
+
+        # Ports to try: original port, then common eSCL HTTP ports
+        original_port = parsed.port or 443
+        ports_to_try = list(dict.fromkeys([original_port, 80, 8080]))
+
+        client = httpx.Client(verify=False, timeout=30.0)
+        for port in ports_to_try:
+            http_url = f"http://{host}:{port}{path}"
+            try:
+                client.get(f"{http_url}/ScannerStatus", timeout=10.0)
+                self.base_url = http_url
+                print(f"  Connected via HTTP on port {port}.", file=sys.stderr)
+                return client
+            except httpx.HTTPError:
+                continue
+
+        # Nothing worked — return client anyway, let the actual scan call
+        # produce a clearer error for the user
+        print(
+            "  Warning: could not reach scanner on any port. "
+            "Check that the scanner is powered on.",
+            file=sys.stderr,
+        )
+        return client
 
     def close(self) -> None:
         self._client.close()
