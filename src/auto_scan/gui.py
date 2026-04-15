@@ -900,6 +900,20 @@ def _run_scan_job(data: dict, mode: str):
             state["job"] = {"status": "error", "result": error_info}
 
 
+def _start_scan_job(data: dict, mode: str):
+    """Reset job state and launch scan in a background thread.
+
+    Setting state["job"] to scanning HERE (in the request thread) prevents
+    a race where the poll loop sees the OLD "done" result before the
+    background thread has started.
+    """
+    with _state_lock:
+        state["job"] = {"status": "scanning"}
+    threading.Thread(
+        target=_run_scan_job, args=(data, mode), daemon=True,
+    ).start()
+
+
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
     """Automatic mode: start scan job in background."""
@@ -907,9 +921,7 @@ def api_scan():
         if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
             return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
     data = request.json or {}
-    threading.Thread(
-        target=_run_scan_job, args=(data, "auto"), daemon=True,
-    ).start()
+    _start_scan_job(data, "auto")
     return jsonify({"ok": True, "status": "started"})
 
 
@@ -920,9 +932,7 @@ def api_scan_assisted():
         if state.get("job") and state["job"]["status"] not in ("done", "error", "duplicate"):
             return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
     data = request.json or {}
-    threading.Thread(
-        target=_run_scan_job, args=(data, "assisted"), daemon=True,
-    ).start()
+    _start_scan_job(data, "assisted")
     return jsonify({"ok": True, "status": "started"})
 
 
@@ -934,9 +944,7 @@ def api_scan_batch():
             return jsonify({"ok": False, "error": "A scan is already in progress."}), 409
     data = request.json or {}
     mode = "batch-auto" if data.get("auto", True) else "batch-assisted"
-    threading.Thread(
-        target=_run_scan_job, args=(data, mode), daemon=True,
-    ).start()
+    _start_scan_job(data, mode)
     return jsonify({"ok": True, "status": "started"})
 
 
