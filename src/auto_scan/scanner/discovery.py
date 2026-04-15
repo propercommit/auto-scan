@@ -15,6 +15,11 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 from auto_scan import ScannerNotFoundError
 
+# ── mDNS service type ────────────────────────────────────────────────
+# _uscan._tcp is the Bonjour/mDNS service type for eSCL scanners,
+# registered by Apple for AirScan. Almost all modern network scanners
+# advertise this. (There is also _uscans._tcp for TLS-only, but in
+# practice scanners advertise both and _uscan is more universally present.)
 ESCL_SERVICE_TYPE = "_uscan._tcp.local."
 
 
@@ -27,10 +32,17 @@ class ScannerInfo:
 
     @property
     def base_url(self) -> str:
+        # Port 443 strongly implies the scanner expects TLS (eSCLS).
+        # The root_path (from mDNS TXT record "rs") is usually "/eSCL".
         scheme = "https" if self.port == 443 else "http"
         path = self.root_path if self.root_path.startswith("/") else f"/{self.root_path}"
         return f"{scheme}://{self.ip}:{self.port}{path}"
 
+
+# ── mDNS listener ────────────────────────────────────────────────────
+# Zeroconf's ServiceBrowser calls add_service on a background thread each
+# time a scanner responds. We use a threading.Event so the main thread
+# can block until at least one match is found (or timeout expires).
 
 class _ScannerListener:
     """mDNS listener that collects all eSCL scanners found on the network."""
@@ -46,6 +58,8 @@ class _ScannerListener:
         if info is None:
             return
 
+        # mDNS TXT records carry scanner metadata as key-value pairs.
+        # "ty" = human-readable model name, "rs" = eSCL root path.
         props = {
             k.decode(): v.decode() if isinstance(v, bytes) else v
             for k, v in info.properties.items()
@@ -59,29 +73,33 @@ class _ScannerListener:
         scanner = ScannerInfo(
             ip=addresses[0],
             port=info.port,
-            root_path=props.get("rs", "/eSCL"),
+            root_path=props.get("rs", "/eSCL"),  # default per eSCL spec
             name=device_type or name,
         )
         self.all_scanners.append(scanner)
 
-        # If a brand filter is set, only auto-select matching scanners
+        # Brand filter: case-insensitive substring match against both the
+        # model name ("ty") and the mDNS service name. This lets users say
+        # --brand=canon to skip the HP printer that also speaks eSCL.
         if self.brand_filter:
             if self.brand_filter in device_type.lower() or self.brand_filter in name.lower():
                 if not self.found:
                     self.found = scanner
                     self.event.set()
         else:
-            # No filter — accept the first scanner found
             if not self.found:
                 self.found = scanner
                 self.event.set()
 
+    # Required by the Zeroconf listener interface but not useful here
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         pass
 
     def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         pass
 
+
+# ── Public discovery API ─────────────────────────────────────────────
 
 def discover_scanner(
     timeout: float = 5.0,
@@ -134,7 +152,8 @@ def discover_all_scanners(timeout: float = 5.0) -> list[ScannerInfo]:
 
     try:
         listener.event.wait(timeout=timeout)
-        # Keep listening for the full timeout to find all devices
+        # After finding the first scanner, keep listening for the full timeout
+        # so we collect *all* devices on the network (mDNS responses are async).
         if listener.found:
             import time
             time.sleep(max(0, timeout - 0.5))
@@ -147,5 +166,10 @@ def discover_all_scanners(timeout: float = 5.0) -> list[ScannerInfo]:
 
 
 def scanner_info_from_ip(ip: str, port: int = 443) -> ScannerInfo:
-    """Construct ScannerInfo directly from an IP address (skip discovery)."""
+    """Construct ScannerInfo directly from an IP address (skip discovery).
+
+    Used when the user sets SCANNER_IP in .env — bypasses mDNS entirely,
+    which is faster and works across subnets where mDNS may not reach.
+    Default port 443 assumes eSCLS (TLS); override for plain HTTP scanners.
+    """
     return ScannerInfo(ip=ip, port=port, root_path="/eSCL", name=f"Scanner@{ip}")

@@ -1,4 +1,8 @@
-"""Scan history tracking via SQLite."""
+"""Scan history tracking via SQLite.
+
+The database lives alongside the scanned documents (output_dir/.auto_scan_history.db)
+so that history travels with the folder if the user moves or backs it up.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +14,25 @@ from pathlib import Path
 from typing import Any
 
 
+# ── Database connection & schema ─────────────────────────────────────
+
 def _get_db(output_dir: Path) -> sqlite3.Connection:
+    """Open (and auto-create) the history database.
+
+    The hidden dotfile name keeps it out of Finder by default. File
+    permissions are 0o600 (owner-only) because scan metadata may reveal
+    sensitive document categories or risk flags.
+    """
     db_path = output_dir / ".auto_scan_history.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     new_db = not db_path.exists()
     conn = sqlite3.connect(str(db_path))
     if new_db:
-        os.chmod(db_path, 0o600)
+        os.chmod(db_path, 0o600)  # owner-only: may contain sensitive metadata
     conn.row_factory = sqlite3.Row
+    # Schema: one row per scan. tags and risks are JSON arrays stored as TEXT
+    # (SQLite has no native array type). image_hash is nullable because
+    # unclassified scans (--no-classify) skip hashing.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS scans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,12 +50,15 @@ def _get_db(output_dir: Path) -> sqlite3.Connection:
             image_hash TEXT
         )
     """)
+    # Index on image_hash enables fast duplicate lookups (find_by_hash)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_scans_hash ON scans(image_hash)
     """)
     conn.commit()
     return conn
 
+
+# ── Write operations ─────────────────────────────────────────────────
 
 def record_scan(
     output_dir: Path,
@@ -85,6 +103,8 @@ def record_scan(
         conn.close()
 
 
+# ── Read / search operations ─────────────────────────────────────────
+
 def search_history(
     output_dir: Path,
     query: str = "",
@@ -94,6 +114,9 @@ def search_history(
     conn = _get_db(output_dir)
     try:
         if query:
+            # Simple LIKE search across the four most useful text columns.
+            # Not full-text search (no FTS5) — good enough for small local DBs
+            # and avoids the complexity of maintaining an FTS index.
             rows = conn.execute(
                 """SELECT * FROM scans
                    WHERE filename LIKE ? OR folder LIKE ?
@@ -112,7 +135,11 @@ def search_history(
 
 
 def find_by_hash(output_dir: Path, image_hash: str) -> dict | None:
-    """Look up a previous scan by image hash. Returns the row or None."""
+    """Look up a previous scan by perceptual image hash. Returns the row or None.
+
+    Used by the dedup flow: if the hash already exists, the UI warns the
+    user they may be re-scanning the same document.
+    """
     conn = _get_db(output_dir)
     try:
         row = conn.execute(

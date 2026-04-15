@@ -1,4 +1,12 @@
-"""Configuration loading and validation."""
+"""Configuration loading and validation.
+
+Precedence (highest to lowest):
+  1. CLI flags (passed as keyword overrides to load_config)
+  2. Environment variables (from shell or .env file)
+  3. Hardcoded defaults (in this module)
+
+This means `--resolution 600` beats SCAN_RESOLUTION=300 in .env.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +17,14 @@ import os
 
 from dotenv import load_dotenv
 
+# ── Allowed values ───────────────────────────────────────────────────
+# These mirror the eSCL spec's supported values. Anything outside these
+# sets is rejected early to avoid cryptic HTTP 4xx from the scanner.
 VALID_COLOR_MODES = {"RGB24", "Grayscale8", "BlackAndWhite1"}
 VALID_SOURCES = {"Feeder", "Platen"}
 VALID_FORMATS = {"image/jpeg", "image/png", "application/pdf"}
-MIN_RESOLUTION = 75
-MAX_RESOLUTION = 1200
+MIN_RESOLUTION = 75    # below 75 DPI text is unreadable
+MAX_RESOLUTION = 1200  # above 1200 DPI files become huge with no OCR benefit
 
 
 @dataclass
@@ -28,16 +39,24 @@ class Config:
     claude_model: str
 
 
+# ── Validation helpers ───────────────────────────────────────────────
+
 def _validate_ip(ip: str) -> bool:
-    """Check if string is a plausible IPv4 address or hostname."""
+    """Check if string is a plausible IPv4 address or hostname.
+
+    Rejects anything with path separators or special characters to prevent
+    URL injection into the eSCL base URL (e.g. "192.168.1.1/../../admin").
+    """
     if not ip:
         return True
-    # IPv4
+    # IPv4: each octet 0-255
     if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
         return all(0 <= int(p) <= 255 for p in ip.split("."))
-    # hostname (letters, digits, hyphens, dots)
+    # Hostname: restrictive charset — no slashes, no spaces
     return bool(re.match(r"^[a-zA-Z0-9._-]+$", ip))
 
+
+# ── Config loader ────────────────────────────────────────────────────
 
 def load_config(**overrides) -> Config:
     """Load config from .env file and environment variables.
@@ -45,8 +64,11 @@ def load_config(**overrides) -> Config:
     Keyword arguments override environment values (used by CLI flags).
     Validates all values and raises ValueError for invalid input.
     """
+    # load_dotenv merges .env into os.environ without overwriting existing
+    # vars, so real env vars take precedence over the .env file.
     load_dotenv()
 
+    # Each setting follows the same pattern: override > env var > default.
     api_key = overrides.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -87,6 +109,8 @@ def load_config(**overrides) -> Config:
             f"Invalid scan source {scan_source!r}. Valid: {', '.join(sorted(VALID_SOURCES))}"
         )
 
+    # scan_format is env-only (no CLI flag) because changing it rarely helps
+    # and can cause issues with scanners that ignore the requested format.
     scan_format = os.environ.get("SCAN_FORMAT", "image/jpeg")
     if scan_format not in VALID_FORMATS:
         raise ValueError(

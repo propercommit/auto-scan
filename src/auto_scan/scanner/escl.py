@@ -2,6 +2,9 @@
 
 Works with any eSCL-compatible scanner: Canon, HP, Epson, Brother,
 Xerox, Ricoh, Kyocera, Lexmark, Samsung, Konica Minolta, etc.
+
+Protocol reference: PWG Candidate Standard 5100.15 (eSCL).
+The workflow is: POST /ScanJobs -> GET /NextDocument in a loop -> DELETE job.
 """
 
 from __future__ import annotations
@@ -18,6 +21,9 @@ from PIL import Image
 
 from auto_scan import ScanError, ScannerBusyError
 
+# ── XML namespace constants ──────────────────────────────────────────
+# eSCL uses two XML namespaces: one from the PWG standard (scanner-agnostic),
+# and one HP-originated namespace that became the de facto eSCL standard.
 PWG_NS = "http://www.pwg.org/schemas/2010/12/sm"
 SCAN_NS = "http://schemas.hp.com/imaging/escl/2011/05/03"
 
@@ -40,13 +46,17 @@ class ScannerStatus:
 
 @dataclass
 class ScanSettings:
-    source: str = "Feeder"
-    color_mode: str = "RGB24"
-    resolution: int = 300
+    """Parameters for a single scan job, serialized to XML for the POST body."""
+
+    source: str = "Feeder"       # "Feeder" (ADF) or "Platen" (flatbed glass)
+    color_mode: str = "RGB24"    # RGB24, Grayscale8, or BlackAndWhite1
+    resolution: int = 300        # DPI — 300 is a good default for OCR
     document_format: str = "image/jpeg"
 
     def to_xml(self) -> str:
-        # Build XML via ElementTree to prevent injection through field values
+        # Build XML via ElementTree to prevent injection through field values.
+        # Using ET instead of f-strings avoids XML injection if field values
+        # ever come from user input (e.g. a web UI).
         root = ET.Element("scan:ScanSettings", {
             "xmlns:pwg": PWG_NS,
             "xmlns:scan": SCAN_NS,
@@ -61,13 +71,19 @@ class ScanSettings:
         return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
 
 
+# ── Format normalization ─────────────────────────────────────────────
+# Scanners are unreliable about honoring DocumentFormat. Canon GX7050, for
+# example, sometimes returns PDF even when JPEG was requested. We normalize
+# everything to JPEG so downstream code (img2pdf, dedup hashing) can rely
+# on a single format.
+
 def _ensure_jpeg(data: bytes) -> bytes:
     """Convert scanner output to JPEG if it isn't already.
 
     Some scanners (notably Canon) may return PDF or other formats even
     when JPEG was requested. This normalizes everything to JPEG bytes.
     """
-    # Fast path: already JPEG
+    # Fast path: JPEG magic bytes (FF D8)
     if data[:2] == b"\xff\xd8":
         return data
 
@@ -81,7 +97,7 @@ def _ensure_jpeg(data: bytes) -> bytes:
     except Exception:
         pass
 
-    # Try extracting image from PDF
+    # Try extracting image from PDF (%PDF- magic bytes)
     if data[:5] == b"%PDF-":
         try:
             import pikepdf
@@ -103,13 +119,17 @@ def _ensure_jpeg(data: bytes) -> bytes:
     )
 
 
+# ── eSCL HTTP client ─────────────────────────────────────────────────
+
 class ESCLClient:
     """HTTP client for the eSCL scanning protocol."""
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
-        # TLS verification disabled: most network scanners use self-signed certs.
-        # This means scanner communication is vulnerable to MITM on the local network.
+        # TLS verification disabled: virtually all network scanners ship with
+        # self-signed certs and there is no practical CA chain to validate.
+        # Trade-off: MITM is possible on the local network, but requiring
+        # valid certs would make the tool unusable with most scanners.
         self._client = httpx.Client(verify=False, timeout=30.0)
         if base_url.startswith("https"):
             print(
@@ -127,6 +147,8 @@ class ESCLClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    # ── Capability & status queries ────────────────────────────────────
+
     def get_capabilities(self) -> ScannerCapabilities:
         """Fetch scanner capabilities (supported resolutions, modes, etc.)."""
         resp = self._client.get(f"{self.base_url}/ScannerCapabilities")
@@ -134,6 +156,9 @@ class ESCLClient:
 
         root = ET.fromstring(resp.text)
 
+        # Walk the entire XML tree: capability XML structure varies between
+        # vendors, but tag names are consistent, so iter() is more robust
+        # than relying on a fixed path.
         resolutions = sorted(
             {
                 int(el.text)
@@ -146,6 +171,7 @@ class ESCLClient:
             for el in root.iter()
             if el.tag.endswith("ColorMode") and el.text
         ]
+        # Presence of <Platen> or <Adf> elements indicates physical source availability
         sources = []
         if root.find(f".//{{{SCAN_NS}}}Platen") is not None:
             sources.append("Platen")
@@ -157,6 +183,7 @@ class ESCLClient:
             if el.tag.endswith("DocumentFormat") and el.text
         ]
 
+        # dict.fromkeys preserves order while deduplicating
         return ScannerCapabilities(
             resolutions=resolutions,
             color_modes=list(dict.fromkeys(color_modes)),
@@ -179,6 +206,8 @@ class ESCLClient:
 
         return ScannerStatus(state=state, adf_state=adf_state)
 
+    # ── Scan job execution ────────────────────────────────────────────
+
     def scan(self, settings: ScanSettings, on_page=None, cancel_fn=None) -> list[bytes]:
         """Execute a scan job and return a list of page images (JPEG bytes).
 
@@ -191,13 +220,14 @@ class ESCLClient:
                        Checked between pages — the current page always completes.
                        Returns whatever pages were captured so far (may be empty).
         """
-        # Create the scan job
+        # ── Step 1: Create the scan job (POST /ScanJobs) ──
         resp = self._client.post(
             f"{self.base_url}/ScanJobs",
             content=settings.to_xml(),
             headers={"Content-Type": "text/xml"},
         )
 
+        # 409 Conflict = another job is already running on this scanner
         if resp.status_code == 409:
             raise ScannerBusyError("Scanner is busy with another job.")
         if resp.status_code != 201:
@@ -209,20 +239,22 @@ class ESCLClient:
         if not job_url:
             raise ScanError("Scanner did not return a job URL.")
 
-        # Normalize job URL — some scanners return relative paths
+        # Normalize job URL: the eSCL spec says Location should be absolute,
+        # but some scanners (observed on Canon GX7050) return a relative path.
         if job_url.startswith("/"):
-            # Extract scheme + host from base_url
             parts = self.base_url.split("/")
-            host = "/".join(parts[:3])
+            host = "/".join(parts[:3])  # "http(s)://host:port"
             job_url = host + job_url
 
+        # ── Step 2: Retrieve pages in a loop (GET /NextDocument) ──
         print("Scanning...", file=sys.stderr)
         pages: list[bytes] = []
         max_retries = 3
         cancelled = False
 
         while True:
-            # ── Check cancel between pages ──
+            # Cancel is cooperative: checked between pages so the mechanical
+            # scan of the current sheet always finishes (can't retract paper).
             if cancel_fn and cancel_fn():
                 cancelled = True
                 print(f"  Scan stopped by user after {len(pages)} page(s)", file=sys.stderr)
@@ -241,11 +273,13 @@ class ESCLClient:
                         raise ScanError("Timed out waiting for scanner.")
                     time.sleep(2)
 
+            # 404/410 = job complete, no more pages in the ADF
             if page_resp.status_code in (404, 410):
-                # No more pages
                 break
+            # 503 = scanner still processing the previous page. Common on
+            # Canon and HP ADF scanners: the hardware needs a moment between
+            # sheets. Retry after a brief delay rather than treating as error.
             if page_resp.status_code == 503:
-                # Some scanners (Canon, HP, etc.) return 503 between ADF pages
                 retries += 1
                 if retries >= max_retries:
                     break
@@ -261,7 +295,7 @@ class ESCLClient:
             if on_page:
                 on_page(len(pages))
 
-            # Flatbed only scans one page
+            # Flatbed (Platen) has no feeder — only one page is possible
             if settings.source == "Platen":
                 break
 
@@ -270,11 +304,12 @@ class ESCLClient:
                 "No pages were scanned. Check that documents are loaded in the feeder."
             )
 
-        # Clean up the job
+        # ── Step 3: Clean up (DELETE job) ──
+        # Best-effort: some scanners auto-delete jobs, and failure here is harmless.
         try:
             self._client.delete(job_url)
         except httpx.HTTPError:
-            pass  # Best-effort cleanup
+            pass
 
         if cancelled:
             print(f"Scan stopped: {len(pages)} page(s) captured", file=sys.stderr)

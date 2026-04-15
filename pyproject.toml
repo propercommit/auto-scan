@@ -19,9 +19,19 @@ dependencies = [
 auto-scan = "auto_scan.cli:main"
 auto-scan-gui = "auto_scan.gui:main"
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8,<9",
+    "pytest-cov>=6,<7",
+]
+
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
