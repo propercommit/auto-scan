@@ -1250,7 +1250,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .classify-modal { width: 860px; max-height: 90vh; overflow-y: auto; }
   .classify-layout { display: flex; gap: 20px; }
   .classify-preview { flex: 0 0 340px; }
-  .classify-preview img { width: 100%; border-radius: var(--radius); border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+  .classify-preview img { width: 100%; border-radius: var(--radius); border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.08); cursor: zoom-in; transition: box-shadow var(--transition), transform var(--transition); }
+  .classify-preview img:hover { box-shadow: 0 4px 16px rgba(0,0,0,.18); transform: scale(1.01); }
   .classify-details { flex: 1; min-width: 0; }
   .classify-summary { font-size: 14px; color: var(--gray); margin-bottom: 16px; padding: 12px; background: var(--bg); border-radius: var(--radius); }
   .classify-summary strong { color: #212529; }
@@ -1678,7 +1679,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <h2 id="classify-title">Classify Document</h2>
     <div class="classify-layout">
       <div class="classify-preview">
-        <img id="classify-img" src="" alt="Document preview">
+        <img id="classify-img" src="" alt="Document preview" onclick="openLightbox(1)" title="Click to preview full size">
       </div>
       <div class="classify-details">
         <div class="classify-summary" id="classify-summary"></div>
@@ -2259,6 +2260,7 @@ function showResult({folder, tags, filename, summary, date, path, riskLevel, ris
 }
 
 function showClassifyModal(data) {
+  classifyPageCount = data.pages || 1;
   $('#classify-img').src = 'data:image/jpeg;base64,' + data.preview;
   $('#classify-summary').innerHTML = '<strong>' + _esc(data.summary || '') + '</strong><br>Date: ' + _esc(data.date || 'Unknown');
   $('#classify-fn').value = data.filename || '';
@@ -2606,7 +2608,8 @@ let _slowPoll = setInterval(function() {}, 99999);
   // But we skip re-fetching in the 5s poll if idle by making refreshUsage cheap (it already is)
 })();
 
-// ── Batch scan ──────────────────────────────────────────────────────
+// ── Classify / Batch scan ───────────────────────────────────────────
+let classifyPageCount = 0; // Number of pages in single-doc classify mode
 let batchData = [];   // Array of doc objects from API
 let batchTags = [];   // Array of Sets, per document
 let batchPages = [];  // Array of arrays of 1-indexed page numbers
@@ -2951,7 +2954,8 @@ function scanNext() {
   const riskEl = $('#r-risk'); if (riskEl) { riskEl.style.display = 'none'; riskEl.innerHTML = ''; }
   const pathEl = $('#r-path'); if (pathEl) { pathEl.style.display = 'none'; pathEl.innerHTML = ''; }
   $('#batch-results-list').innerHTML = '';
-  // Clear stale batch data from previous scan
+  // Clear stale data from previous scan
+  classifyPageCount = 0;
   batchData = [];
   batchPages = [];
   batchTags = [];
@@ -2968,11 +2972,16 @@ function openLightbox(pageNum, docIdx) {
   // Navigate only within the document's own pages
   if (docIdx != null && batchPages[docIdx]) {
     lightboxPages = [...batchPages[docIdx]].sort((a, b) => a - b);
-  } else {
-    // Fallback: all pages (single-doc mode)
+  } else if (batchPages.length > 0) {
+    // Batch mode fallback: all pages across documents
     lightboxPages = [];
     batchPages.forEach(pages => pages.forEach(p => { if (!lightboxPages.includes(p)) lightboxPages.push(p); }));
     lightboxPages.sort((a, b) => a - b);
+  } else if (classifyPageCount > 0) {
+    // Single-doc classify mode: pages 1..N
+    lightboxPages = Array.from({length: classifyPageCount}, (_, i) => i + 1);
+  } else {
+    lightboxPages = [1];
   }
   lightboxIdx = lightboxPages.indexOf(pageNum);
   if (lightboxIdx === -1) lightboxIdx = 0;
