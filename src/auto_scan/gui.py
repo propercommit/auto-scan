@@ -528,12 +528,16 @@ def _do_scan(data: dict) -> tuple[list[bytes], Config]:
                 if job:
                     job["pages_scanned"] = count
 
+        def _cancel_check():
+            with _state_lock:
+                return state.get("job", {}).get("cancelled", False)
+
         # Use validated config values (not raw user input) to prevent XML injection
         settings = ScanSettings(
             source=config.scan_source, color_mode=config.color_mode,
             resolution=config.resolution, document_format=config.scan_format,
         )
-        images = client.scan(settings, on_page=_on_page)
+        images = client.scan(settings, on_page=_on_page, cancel_fn=_cancel_check)
 
     _log(f"Scanned {len(images)} page(s)")
     return images, config
@@ -568,15 +572,46 @@ def _record(config: Config, doc_info: DocumentInfo | None, folder: str, tags: li
     )
 
 
-def _run_scan_job(data: dict, mode: str):
-    """Run a scan job in a background thread. Updates state['job']."""
-    # Clear stale state from any previous scan
+def _is_cancelled() -> bool:
+    """Check if the current job has been cancelled by the user."""
     with _state_lock:
-        state["pending_images"] = None
-        state["pending_doc_info"] = None
-        state["pending_batch_docs"] = None
-        state["pending_config"] = None
-        state["_redacted_previews"] = {}
+        return state.get("job", {}).get("cancelled", False)
+
+
+def _pause_job(next_step: str, mode: str, data: dict, redact: bool, redact_pats):
+    """Transition the job to 'paused' state so the user can resume later."""
+    with _state_lock:
+        pages_scanned = state.get("job", {}).get("pages_scanned", 0)
+        state["job"] = {
+            "status": "paused",
+            "paused_step": next_step,
+            "paused_context": {
+                "mode": mode,
+                "data": data,
+                "redact": redact,
+                "redact_pats": list(redact_pats) if redact_pats else None,
+            },
+            "pages_scanned": pages_scanned,
+        }
+    _log(f"Paused — {pages_scanned} page(s) captured, will resume at {next_step}")
+
+
+def _run_scan_job(data: dict, mode: str, resume_from: str | None = None):
+    """Run a scan job in a background thread. Updates state['job'].
+
+    Args:
+        resume_from: If set, skip steps before this one. The scanned images
+                     should already be in state['pending_images'].
+                     Values: "privacy", "analysis", "save".
+    """
+    # Clear stale state from any previous scan (unless resuming)
+    if not resume_from:
+        with _state_lock:
+            state["pending_images"] = None
+            state["pending_doc_info"] = None
+            state["pending_batch_docs"] = None
+            state["pending_config"] = None
+            state["_redacted_previews"] = {}
     try:
         # Load settings
         settings = _load_settings()
@@ -592,31 +627,66 @@ def _run_scan_job(data: dict, mode: str):
                     f"Increase the limit in Settings or wait until tomorrow."
                 )
 
-        with _state_lock:
-            state["job"] = {"status": "scanning"}
-        images, config = _do_scan(data)
+        # ── Step 1: Physical scan (skip if resuming) ──────────────────
+        if resume_from:
+            _log(f"Resuming from {resume_from} step...")
+            with _state_lock:
+                images = state.get("pending_images") or []
+                config = state.get("pending_config")
+            if not images:
+                raise AutoScanError("No scanned images to resume with.")
+            if not config:
+                # Rebuild config from data
+                overrides = {"scan_source": data.get("source", "Feeder"),
+                             "resolution": int(data.get("resolution", 300)),
+                             "color_mode": data.get("color", "RGB24")}
+                output_dir = data.get("output_dir", "")
+                if output_dir:
+                    overrides["output_dir"] = output_dir
+                scanner_ip = data.get("scanner_ip", "").strip()
+                if scanner_ip:
+                    overrides["scanner_ip"] = scanner_ip
+                config = _get_config(**overrides)
+        else:
+            with _state_lock:
+                state["job"] = {"status": "scanning"}
+            images, config = _do_scan(data)
 
-        # Store images early so they're available for preview endpoints
+        # Store images + config for preview and resume
         with _state_lock:
             state["pending_images"] = images
+            state["pending_config"] = config
 
-        # Duplicate check
-        prev = _check_duplicate(images, config)
-        if prev:
-            _log(f"Duplicate detected: previously saved as {prev['filename']}")
-            with _state_lock:
-                state["job"] = {
-                    "status": "duplicate",
-                    "result": {"duplicate": True, "previous": prev},
-                }
+        # ── Cancel check: after scan ──
+        if _is_cancelled():
+            _pause_job("privacy", mode, data, redact, redact_pats)
             return
+        if not images:
+            # Cancelled during scan with 0 pages captured
+            _pause_job("privacy", mode, data, redact, redact_pats)
+            return
+
+        # Duplicate check (skip on resume — already passed)
+        if not resume_from:
+            prev = _check_duplicate(images, config)
+            if prev:
+                _log(f"Duplicate detected: previously saved as {prev['filename']}")
+                with _state_lock:
+                    state["job"] = {
+                        "status": "duplicate",
+                        "result": {"duplicate": True, "previous": prev},
+                    }
+                return
 
         # ── Privacy gate: ALWAYS require explicit user confirmation ──────
         # unless reckless mode is on. This is the ONLY code path to AI.
         import time as _time
         page_redactions = {}  # tracks which pages had redactions (1-indexed)
+        skip_privacy = resume_from and resume_from != "privacy"
 
-        if reckless:
+        if skip_privacy:
+            _log("Resuming — skipping privacy check (already completed)")
+        elif reckless:
             _log("OCR privacy check: skipped (reckless mode)")
         else:
             # Run OCR redaction if enabled
@@ -702,6 +772,11 @@ def _run_scan_job(data: dict, mode: str):
 
             _log("User confirmed — proceeding to AI analysis")
 
+        # ── Cancel check: after privacy gate ──
+        if _is_cancelled():
+            _pause_job("analysis", mode, data, redact, redact_pats)
+            return
+
         if mode == "auto":
             classify = data.get("classify", True)
             if classify:
@@ -710,6 +785,13 @@ def _run_scan_job(data: dict, mode: str):
                 _log("Analyzing with Claude Vision...")
                 doc_info = analyze_document(images, config, redact=redact, redact_patterns=redact_pats)
                 _log(f"Classified as: {doc_info.category}")
+
+                # ── Cancel check: after analysis ──
+                if _is_cancelled():
+                    with _state_lock:
+                        state["pending_doc_info"] = doc_info
+                    _pause_job("save", mode, data, redact, redact_pats)
+                    return
 
                 with _state_lock:
                     state["job"]["status"] = "saving"
@@ -750,6 +832,11 @@ def _run_scan_job(data: dict, mode: str):
             _log("Analyzing with Claude Vision...")
             doc_info = analyze_document(images, config, redact=redact, redact_patterns=redact_pats)
             _log(f"AI suggests: {doc_info.category}")
+            if _is_cancelled():
+                with _state_lock:
+                    state["pending_doc_info"] = doc_info
+                _pause_job("save", mode, data, redact, redact_pats)
+                return
 
             thumb = _make_thumbnail(images[0])
             preview_b64 = base64.b64encode(thumb).decode("ascii")
@@ -778,6 +865,11 @@ def _run_scan_job(data: dict, mode: str):
             _log(f"Batch analyzing {len(images)} pages...")
             batch_results = analyze_batch(images, config, redact=redact, redact_patterns=redact_pats)
             _log(f"Detected {len(batch_results)} document(s)")
+            if _is_cancelled():
+                with _state_lock:
+                    state["pending_batch_docs"] = batch_results
+                _pause_job("save", mode, data, redact, redact_pats)
+                return
 
             with _state_lock:
                 state["job"]["status"] = "saving"
@@ -813,6 +905,11 @@ def _run_scan_job(data: dict, mode: str):
             _log(f"Batch analyzing {len(images)} pages...")
             batch_results = analyze_batch(images, config, redact=redact, redact_patterns=redact_pats)
             _log(f"Detected {len(batch_results)} document(s)")
+            if _is_cancelled():
+                with _state_lock:
+                    state["pending_batch_docs"] = batch_results
+                _pause_job("save", mode, data, redact, redact_pats)
+                return
 
             # Thumbnails for ALL pages so frontend can rearrange freely
             all_previews = []
@@ -978,6 +1075,76 @@ def api_job_cancel():
             job["user_cancelled"] = True
             return jsonify({"ok": True})
     return jsonify({"ok": False}), 400
+
+
+@app.route("/api/job/stop", methods=["POST"])
+def api_job_stop():
+    """User stops/pauses the current job at whatever step it's on.
+
+    Sets a 'cancelled' flag that the background thread checks between steps.
+    The job transitions to 'paused' with scanned images preserved.
+    """
+    with _state_lock:
+        job = state.get("job")
+        if not job:
+            return jsonify({"ok": False, "error": "No active job"}), 400
+        status = job.get("status", "")
+        if status in ("done", "error", "paused", "duplicate"):
+            return jsonify({"ok": False, "error": f"Job is already {status}"}), 400
+        # Set cancel flag — checked between steps and between scanner pages
+        job["cancelled"] = True
+        # If in confirm_send, also set user_cancelled to unblock the wait loop
+        if status == "confirm_send":
+            job["user_cancelled"] = True
+        return jsonify({"ok": True})
+
+
+@app.route("/api/job/resume", methods=["POST"])
+def api_job_resume():
+    """Resume a paused job from where it left off.
+
+    Reads the paused_context from the job state and launches a new
+    background thread that skips already-completed steps.
+    """
+    with _state_lock:
+        job = state.get("job")
+        if not job or job.get("status") != "paused":
+            return jsonify({"ok": False, "error": "No paused job to resume"}), 400
+        ctx = job.get("paused_context", {})
+        next_step = job.get("paused_step", "privacy")
+
+    mode = ctx.get("mode", "assisted")
+    data = ctx.get("data", {})
+
+    # Restore redaction settings from paused context
+    if ctx.get("redact") is not None:
+        pass  # Settings will be re-loaded from _load_settings() in the thread
+
+    # Launch resume thread
+    with _state_lock:
+        status_label = {"privacy": "checking_privacy", "analysis": "analyzing", "save": "saving"}.get(next_step, "analyzing")
+        state["job"] = {"status": status_label, "pages_scanned": len(state.get("pending_images") or [])}
+    threading.Thread(
+        target=_run_scan_job, args=(data, mode, next_step), daemon=True,
+    ).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/job/discard", methods=["POST"])
+def api_job_discard():
+    """Discard a paused job and clear all pending state."""
+    with _state_lock:
+        job = state.get("job")
+        if not job or job.get("status") != "paused":
+            return jsonify({"ok": False, "error": "No paused job to discard"}), 400
+        state["job"] = None
+        state["pending_images"] = None
+        state["pending_doc_info"] = None
+        state["pending_batch_docs"] = None
+        state["pending_config"] = None
+        state["_redacted_previews"] = {}
+    _log("Paused job discarded")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/page-image/<int:page_num>")
@@ -1775,7 +1942,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
+      <div style="text-align:center;margin-top:10px">
+        <button class="btn btn-secondary" id="btn-stop-job" onclick="stopJob()" style="display:none;width:auto;padding:6px 20px;background:#EF4444;border-color:#EF4444;color:#fff">⏹ Stop</button>
+      </div>
       <div class="redact-alert" id="redact-alert" style="display:none"></div>
+    </div>
+    <div class="card" id="paused-card" style="display:none;text-align:center;border:2px solid #F59E0B" aria-live="polite">
+      <div style="font-size:28px;margin-bottom:8px">⏸</div>
+      <h2 style="margin:0 0 4px">Scan Paused</h2>
+      <p id="paused-detail" style="color:var(--gray);margin:0 0 16px"></p>
+      <div style="display:flex;gap:10px;justify-content:center">
+        <button class="btn" onclick="resumeJob()" style="width:auto;padding:8px 24px">▶ Resume</button>
+        <button class="btn btn-secondary" onclick="discardJob()" style="width:auto;padding:8px 24px;background:#EF4444;border-color:#EF4444;color:#fff">🗑 Discard</button>
+      </div>
     </div>
   </div>
 
@@ -2122,9 +2301,11 @@ function setBusy(busy) {
     prog.style.display = '';
     resetPipeline();
     setPipeStep('pipe-scan', 'active', 'Starting...');
+    $('#btn-stop-job').style.display = '';
   } else {
     prog.style.display = 'none';
     $('#redact-alert').style.display = 'none';
+    $('#btn-stop-job').style.display = 'none';
   }
 }
 
@@ -2290,6 +2471,13 @@ function pollJob() {
           showRedactWarning(job);
           return; // keep polling, waiting for user
         }
+        if (job.status === 'paused') {
+          clearInterval(interval);
+          hideRedactWarning();
+          refreshLog();
+          resolve(job);  // Let the caller show the paused UI
+          return;
+        }
         clearInterval(interval);
         hideRedactWarning();
         refreshLog();
@@ -2389,6 +2577,7 @@ async function scanOnly() {
     const start = await res.json();
     if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
+    if (job.status === 'paused') { showPaused(job); return; }
     if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
     else if (job.status === 'done' && job.result) { showResult({folder: 'unsorted', tags: [], filename: (job.result.output_path || '').split(/[/\\]/).pop(), summary: 'Saved without classification', path: job.result.output_path}); }
@@ -2406,6 +2595,7 @@ async function doScanAuto() {
     const start = await res.json();
     if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
+    if (job.status === 'paused') { showPaused(job); return; }
     if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
     else if (job.status === 'done' && job.result && job.result.classified) {
@@ -2424,6 +2614,7 @@ async function doScanAssisted() {
     const start = await res.json();
     if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
+    if (job.status === 'paused') { showPaused(job); return; }
     if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
     else if (job.status === 'done' && job.result && job.result.ok) { showClassifyModal(job.result); }
@@ -2830,6 +3021,7 @@ async function doBatchScan() {
     const start = await res.json();
     if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
+    if (job.status === 'paused') { showPaused(job); return; }
     if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'done' && job.result && job.result.batch) {
       showBatchModal(job.result);
@@ -3192,8 +3384,69 @@ function retryLastScan() {
   if (_lastScanFn) _lastScanFn();
 }
 
+async function stopJob() {
+  try {
+    await fetch('/api/job/stop', { method: 'POST' });
+    // The poll loop will pick up the 'paused' status
+  } catch(e) { console.error('Stop failed:', e); }
+}
+
+function showPaused(job) {
+  setBusy(false);
+  $('#paused-card').style.display = '';
+  const pages = job.pages_scanned || 0;
+  const step = job.paused_step || 'next step';
+  const stepLabels = {privacy: 'privacy check', analysis: 'AI analysis', save: 'saving'};
+  const stepLabel = stepLabels[step] || step;
+  $('#paused-detail').textContent = pages + ' page(s) captured — will resume at ' + stepLabel;
+}
+
+function hidePaused() {
+  $('#paused-card').style.display = 'none';
+}
+
+async function resumeJob() {
+  hidePaused();
+  setBusy(true);
+  // Update pipeline to show we're resuming
+  const pausedStep = (await (await fetch('/api/job')).json()).paused_step || 'analysis';
+  const stepMap = {privacy: 'pipe-ocr', analysis: 'pipe-ai', save: 'pipe-save'};
+  setPipeStep('pipe-scan', 'done');
+  if (stepMap[pausedStep]) setPipeStep(stepMap[pausedStep], 'active', 'Resuming...');
+
+  try {
+    const res = await fetch('/api/job/resume', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) { showScanError({result: {error: data.error, error_type: 'app', hint: data.error}}); setBusy(false); return; }
+    const job = await pollJob();
+    if (job.status === 'paused') { showPaused(job); return; }
+    if (job.status === 'error') { showScanError(job); }
+    else if (job.status === 'done' && job.result) {
+      if (job.result.batch) { showBatchModal(job.result); }
+      else if (job.result.classified) {
+        const d = job.result;
+        showResult({folder: d.category, tags: d.tags || [d.category], filename: d.filename, summary: d.summary, date: d.date, path: d.output_path, riskLevel: d.risk_level, risks: d.risks});
+      } else if (job.result.category) {
+        showClassifyModal(job.result);
+      } else {
+        showResult({folder: 'unsorted', tags: [], filename: (job.result.output_path || '').split(/[/\\]/).pop(), summary: 'Saved without classification', path: job.result.output_path});
+      }
+    }
+  } catch(e) { showScanError({result: {error: e.message, error_type: 'unknown', hint: 'Resume failed.'}}); }
+  setBusy(false); refreshLog();
+}
+
+async function discardJob() {
+  hidePaused();
+  try {
+    await fetch('/api/job/discard', { method: 'POST' });
+  } catch(e) { console.error('Discard failed:', e); }
+  refreshLog();
+}
+
 function scanNext() {
   dismissError();
+  hidePaused();
   $('#results-card').style.display = 'none';
   $('#batch-results-card').style.display = 'none';
   // Reset result fields

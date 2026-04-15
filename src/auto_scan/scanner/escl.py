@@ -179,7 +179,7 @@ class ESCLClient:
 
         return ScannerStatus(state=state, adf_state=adf_state)
 
-    def scan(self, settings: ScanSettings, on_page=None) -> list[bytes]:
+    def scan(self, settings: ScanSettings, on_page=None, cancel_fn=None) -> list[bytes]:
         """Execute a scan job and return a list of page images (JPEG bytes).
 
         For ADF scanning, loops until all pages are consumed.
@@ -187,6 +187,9 @@ class ESCLClient:
 
         Args:
             on_page: Optional callback called with page count after each page is scanned.
+            cancel_fn: Optional callable returning True if the scan should stop.
+                       Checked between pages — the current page always completes.
+                       Returns whatever pages were captured so far (may be empty).
         """
         # Create the scan job
         resp = self._client.post(
@@ -216,8 +219,15 @@ class ESCLClient:
         print("Scanning...", file=sys.stderr)
         pages: list[bytes] = []
         max_retries = 3
+        cancelled = False
 
         while True:
+            # ── Check cancel between pages ──
+            if cancel_fn and cancel_fn():
+                cancelled = True
+                print(f"  Scan stopped by user after {len(pages)} page(s)", file=sys.stderr)
+                break
+
             retries = 0
             while retries < max_retries:
                 try:
@@ -255,7 +265,7 @@ class ESCLClient:
             if settings.source == "Platen":
                 break
 
-        if not pages:
+        if not pages and not cancelled:
             raise ScanError(
                 "No pages were scanned. Check that documents are loaded in the feeder."
             )
@@ -266,5 +276,8 @@ class ESCLClient:
         except httpx.HTTPError:
             pass  # Best-effort cleanup
 
-        print(f"Scan complete: {len(pages)} page(s)", file=sys.stderr)
+        if cancelled:
+            print(f"Scan stopped: {len(pages)} page(s) captured", file=sys.stderr)
+        else:
+            print(f"Scan complete: {len(pages)} page(s)", file=sys.stderr)
         return pages
