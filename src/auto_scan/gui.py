@@ -1267,7 +1267,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .add-tag-row input { flex: 1; padding: 8px 12px; font-size: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: #212529; }
   .btn-add-tag { flex-shrink: 0; padding: 8px 14px; width: auto; font-size: 13px; }
   .classify-folder { margin-top: 14px; }
-  .classify-folder input[type="text"] { font-family: var(--mono); font-size: 13px; }
+  .classify-folder input[type="text"], .classify-folder select { font-family: var(--mono); font-size: 13px; }
   .field-hint { font-size: 12px; color: var(--gray-light); margin-top: 3px; }
   .classify-filename { margin-top: 12px; }
   .classify-filename input[type="text"] { font-family: var(--mono); font-size: 13px; }
@@ -1507,9 +1507,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <h2>Scanner</h2>
     <div class="connect-row">
       <div>
-        <label for="scanner-ip">Scanner IP (leave blank for auto-discover)</label>
-        <input type="text" id="scanner-ip" placeholder="192.168.1.x" list="scanner-list">
-        <datalist id="scanner-list"></datalist>
+        <label for="scanner-select">Scanner</label>
+        <select id="scanner-select" onchange="onScannerSelect()">
+          <option value="">-- Select a scanner --</option>
+          <option value="__manual__">Enter IP manually</option>
+        </select>
+        <input type="text" id="scanner-ip" placeholder="192.168.1.x" style="display:none;margin-top:6px">
       </div>
       <button class="btn btn-secondary btn-connect" onclick="discoverScanners()">Find</button>
       <button class="btn btn-primary btn-connect" onclick="connect()">Connect</button>
@@ -1694,8 +1697,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="risk-alert" id="classify-risk" style="display:none"></div>
         <div class="classify-folder">
           <label for="classify-folder">Save to folder</label>
-          <input type="text" id="classify-folder" value="" list="folder-suggestions">
-          <datalist id="folder-suggestions"></datalist>
+          <select id="classify-folder"></select>
           <p class="field-hint">Subfolder inside your output directory where this document will be saved.</p>
         </div>
         <div class="classify-filename">
@@ -1766,7 +1768,18 @@ let pendingRisk = {level: null, risks: []};
     const res = await fetch('/api/settings');
     const s = await res.json();
     if (s.output_dir) $('#output-dir').value = s.output_dir;
-    if (s.scanner_ip) $('#scanner-ip').value = s.scanner_ip;
+    if (s.scanner_ip) {
+      // Check if the saved IP matches a discovered scanner option
+      const sel = $('#scanner-select');
+      const match = [...sel.options].find(o => o.value === s.scanner_ip);
+      if (match) {
+        sel.value = s.scanner_ip;
+      } else {
+        sel.value = '__manual__';
+        $('#scanner-ip').value = s.scanner_ip;
+        $('#scanner-ip').style.display = '';
+      }
+    }
     if (s.resolution) $('#resolution').value = s.resolution;
     if (s.color_mode) $('#color').value = s.color_mode;
     if (s.scan_source) {
@@ -1861,7 +1874,7 @@ async function testOCR() {
 function saveSettings() {
   const settings = {
     output_dir: $('#output-dir').value,
-    scanner_ip: $('#scanner-ip').value.trim(),
+    scanner_ip: getScannerIP(),
     resolution: $('#resolution').value,
     color_mode: $('#color').value,
     scan_source: document.querySelector('input[name="source"]:checked').value,
@@ -1894,11 +1907,11 @@ function setMode(mode) {
 }
 
 // Auto-save settings when inputs change
-['#output-dir','#scanner-ip','#resolution','#color'].forEach(s => {
+['#output-dir','#scanner-ip','#scanner-select','#resolution','#color'].forEach(s => {
   const el = $(s); if (el) el.addEventListener('change', saveSettings);
 });
 document.querySelectorAll('input[name="source"]').forEach(r => r.addEventListener('change', saveSettings));
-$('#classify-folder').addEventListener('input', function() { this.classList.remove('input-error'); });
+$('#classify-folder').addEventListener('change', function() { this.classList.remove('input-error'); });
 
 function closeApiModal() { closeModal('#api-key-modal'); }
 async function saveApiKey() {
@@ -1924,7 +1937,7 @@ async function browseFolder() {
 }
 
 function getScanParams() {
-  return { source: document.querySelector('input[name="source"]:checked').value, resolution: $('#resolution').value, color: $('#color').value, output_dir: $('#output-dir').value, scanner_ip: $('#scanner-ip').value.trim() };
+  return { source: document.querySelector('input[name="source"]:checked').value, resolution: $('#resolution').value, color: $('#color').value, output_dir: $('#output-dir').value, scanner_ip: getScannerIP() };
 }
 function setBusy(busy) {
   ['#btn-classify','#btn-scan','#btn-batch'].forEach(s => { const el = $(s); if (el) { el.disabled = busy; el.setAttribute('aria-busy', busy); el.classList.toggle('busy', busy); }});
@@ -2122,18 +2135,20 @@ async function discoverScanners() {
     const res = await fetch('/api/discover', { method: 'POST' });
     const data = await res.json();
     if (data.ok && data.scanners.length > 0) {
-      const dl = $('#scanner-list');
-      dl.innerHTML = '';
+      const sel = $('#scanner-select');
+      // Keep the first two default options, clear discovered ones
+      while (sel.options.length > 2) sel.remove(2);
       data.scanners.forEach(s => {
         const opt = document.createElement('option');
         opt.value = s.ip;
-        opt.label = s.name + ' (' + s.ip + ')';
-        dl.appendChild(opt);
+        opt.textContent = s.name + ' (' + s.ip + ')';
+        sel.appendChild(opt);
       });
       st.textContent = 'Found ' + data.scanners.length + ' scanner(s) \u2014 select one and click Connect';
       st.className = 'status connected';
       if (data.scanners.length === 1) {
-        $('#scanner-ip').value = data.scanners[0].ip;
+        sel.value = data.scanners[0].ip;
+        $('#scanner-ip').style.display = 'none';
       }
     } else if (data.ok) {
       st.textContent = 'No scanners found on the network.'; st.className = 'status error';
@@ -2144,8 +2159,19 @@ async function discoverScanners() {
   refreshLog();
 }
 
+function getScannerIP() {
+  const sel = $('#scanner-select');
+  if (sel.value === '__manual__') return $('#scanner-ip').value.trim();
+  return sel.value;
+}
+
+function onScannerSelect() {
+  const sel = $('#scanner-select');
+  $('#scanner-ip').style.display = sel.value === '__manual__' ? '' : 'none';
+}
+
 async function connect() {
-  const ip = $('#scanner-ip').value.trim();
+  const ip = getScannerIP();
   const st = $('#scanner-status');
   const info = $('#scanner-info');
   st.textContent = 'Connecting...'; st.className = 'status disconnected';
@@ -2269,17 +2295,16 @@ function showClassifyModal(data) {
   const aiTags = data.tags || [];
   selectedTags = new Set(aiTags);
 
-  // Pre-fill folder with AI's primary category
-  $('#classify-folder').value = data.category || 'other';
-
-  // Populate folder suggestions from all categories
-  const dl = $('#folder-suggestions');
-  dl.innerHTML = '';
+  // Populate folder dropdown from all categories
+  const folderSelect = $('#classify-folder');
+  folderSelect.innerHTML = '';
   (data.all_categories || []).forEach(cat => {
     const opt = document.createElement('option');
     opt.value = cat;
-    dl.appendChild(opt);
+    opt.textContent = cat;
+    folderSelect.appendChild(opt);
   });
+  folderSelect.value = data.category || 'other';
 
   // Render tag buttons
   renderTagButtons();
@@ -2774,7 +2799,7 @@ function renderBatchDocs(skipSync) {
       '<div class="batch-page-grid" data-doc="' + i + '">' + pagesHtml + '</div>' +
       '<div class="batch-fields">' +
         '<label>Filename</label><input type="text" id="batch-fn-' + i + '" value="' + esc(fn) + '">' +
-        '<label>Folder</label><input type="text" id="batch-folder-' + i + '" value="' + esc(folder) + '" list="folder-suggestions">' +
+        '<label>Folder</label><select id="batch-folder-' + i + '">' + (doc.all_categories || []).map(function(cat) { return '<option value="' + esc(cat) + '"' + (cat === folder ? ' selected' : '') + '>' + esc(cat) + '</option>'; }).join('') + '</select>' +
         '<label>Tags</label><div class="batch-tag-grid" id="batch-tags-' + i + '">' + tagsHtml + '</div>' +
         '<label></label><div class="batch-add-tag-row"><input type="text" id="batch-add-tag-' + i + '" placeholder="Add a tag..." aria-label="Add tag to document ' + (i+1) + '"><button class="btn btn-secondary" onclick="addBatchTag(' + i + ')">Add</button></div>' +
       '</div>' +
