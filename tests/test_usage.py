@@ -17,6 +17,7 @@ from auto_scan.usage import (
     reset_daily_usage,
     COST_PER_INPUT_TOKEN,
     COST_PER_OUTPUT_TOKEN,
+    MODEL_PRICING,
     MIN_API_INTERVAL,
 )
 
@@ -74,6 +75,81 @@ class TestGetUsage:
         )
         assert usage["estimated_cost"] == expected_cost
         assert usage["total_tokens"] == 1_100_000
+
+
+# ── Model-aware pricing ─────────────────────────────────────────
+
+class TestModelPricing:
+    """Test per-model cost tracking."""
+
+    def test_sonnet_default(self):
+        """No model → Sonnet pricing."""
+        record_usage(1_000_000, 100_000)
+        usage = get_usage()
+        expected = round(
+            1_000_000 * MODEL_PRICING["sonnet"]["input"]
+            + 100_000 * MODEL_PRICING["sonnet"]["output"],
+            4,
+        )
+        assert usage["estimated_cost"] == expected
+
+    def test_opus_pricing(self):
+        """Opus model should use higher rates."""
+        record_usage(1_000_000, 100_000, model="claude-opus-4-20250514")
+        usage = get_usage()
+        expected = round(
+            1_000_000 * MODEL_PRICING["opus"]["input"]
+            + 100_000 * MODEL_PRICING["opus"]["output"],
+            4,
+        )
+        assert usage["estimated_cost"] == expected
+
+    def test_haiku_pricing(self):
+        """Haiku model should use lower rates."""
+        record_usage(1_000_000, 100_000, model="claude-haiku-3")
+        usage = get_usage()
+        expected = round(
+            1_000_000 * MODEL_PRICING["haiku"]["input"]
+            + 100_000 * MODEL_PRICING["haiku"]["output"],
+            4,
+        )
+        assert usage["estimated_cost"] == expected
+
+    def test_mixed_models_accumulate(self):
+        """Multiple calls with different models accumulate correctly."""
+        record_usage(100_000, 10_000, model="claude-sonnet-4-20250514")
+        record_usage(50_000, 5_000, model="claude-opus-4-20250514")
+        usage = get_usage()
+
+        sonnet_cost = (
+            100_000 * MODEL_PRICING["sonnet"]["input"]
+            + 10_000 * MODEL_PRICING["sonnet"]["output"]
+        )
+        opus_cost = (
+            50_000 * MODEL_PRICING["opus"]["input"]
+            + 5_000 * MODEL_PRICING["opus"]["output"]
+        )
+        expected = round(sonnet_cost + opus_cost, 4)
+        assert usage["estimated_cost"] == expected
+
+    def test_history_includes_model(self):
+        """History entries should record model name and per-call cost."""
+        record_usage(100, 50, model="claude-opus-4-20250514")
+        usage = get_usage()
+        entry = usage["history"][0]
+        assert entry["model"] == "claude-opus-4-20250514"
+        assert entry["cost"] > 0
+
+    def test_unknown_model_defaults_to_sonnet(self):
+        """Unrecognized model name falls back to Sonnet pricing."""
+        record_usage(1_000_000, 100_000, model="some-future-model")
+        usage = get_usage()
+        expected = round(
+            1_000_000 * MODEL_PRICING["sonnet"]["input"]
+            + 100_000 * MODEL_PRICING["sonnet"]["output"],
+            4,
+        )
+        assert usage["estimated_cost"] == expected
 
 
 # ── Budget enforcement ────────────────────────────────────────────

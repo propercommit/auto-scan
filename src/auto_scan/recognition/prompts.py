@@ -127,11 +127,86 @@ EXAMPLE — a BMW sales contract:
 }}"""
 
 
+# ── Single-pass batch (small batches ≤ SINGLE_PASS_THRESHOLD) ─────
+# For small batches the model can group + classify in one call,
+# avoiding sending images twice. Uses the same grouping rules as the
+# 2-step pipeline, plus classification output per group.
+
+BATCH_COMBINED_PROMPT = """\
+You are a document sorting and classification expert. You receive \
+{num_pages} scanned pages from a mixed stack. Pages from DIFFERENT \
+documents may be shuffled together. Each image is labeled with its \
+page number (1–{num_pages}).
+
+Your job: read every page, group pages that belong to the same \
+document, and classify each document.
+
+═══ STEP 1: READ EVERY PAGE ═══
+For each page, note:
+  a) Document TYPE (invoice, letter, insurance policy, form…)
+  b) Header / letterhead / logo
+  c) Reference numbers (invoice #, policy #, contract #, account #)
+  d) Sender and recipient
+  e) Page numbering ("Page 2 of 4", "2/4", footers)
+  f) Language, formatting, visual style
+
+═══ STEP 2: GROUP PAGES ═══
+Two pages belong to the SAME document ONLY when ALL match:
+  ✓ Same document TYPE
+  ✓ Same reference / policy / contract / invoice number
+  ✓ Same sender AND recipient
+  ✓ Compatible page numbering (no duplicate page numbers)
+  ✓ Same formatting, letterhead, visual style
+  ✓ Content continues from one page to the next
+
+ALWAYS separate:
+  ✗ Different document types (insurance ≠ sales contract)
+  ✗ A cover letter and the enclosed form → 2 docs
+  ✗ Different headers or letterheads → separate
+
+WHEN IN DOUBT → SPLIT.
+
+═══ STEP 3: CLASSIFY AND OUTPUT ═══
+Return ONLY valid JSON (no markdown) — an array of document groups:
+
+[{{
+  "pages": [1, 2],
+  "confidence": 95,
+  "page_confidence": {{"1": 95, "2": 80}},
+  "category": "<best from [{categories}]>",
+  "issuer": "<who issued this>",
+  "subject": "<specific subject>",
+  "ref_number": "<primary reference number or null>",
+  "summary": "<one sentence>",
+  "date": "<YYYY-MM-DD or null>",
+  "key_fields": {{}},
+  "suggested_categories": [],
+  "tags": [],
+  "risk_level": "none"|"low"|"medium"|"high",
+  "risks": []
+}}]
+
+FIELD RULES:
+  - "issuer": clean short form (e.g. "Vodafone" not "Vodafone GmbH").
+  - "subject": specific — "march_mobile_bill" not "bill".
+  - "ref_number": the most prominent identifier, or null.
+  - "date": the document's own date, NOT today ({today}). null if not found.
+  - "tags": 5–15 lowercase keywords from actual content.
+
+CONFIDENCE (0–100):
+  90–100: Strong evidence (matching ref numbers, continuous content)
+  70–89: Likely correct (similar style, minor ambiguity)
+  50–69: Uncertain (could belong elsewhere)
+
+Categories: {categories}
+Every page (1–{num_pages}) must appear in exactly one group."""
+
+
 # ── Batch page grouping (step 1 of 2-step pipeline) ──────────────
-# Used by analyze_batch(). The model's ONLY job here is to figure out
-# which pages belong together. Classification happens in step 2 by
-# reusing ANALYSIS_PROMPT per group. Keeping grouping separate reduces
-# cognitive load and improves accuracy on both tasks.
+# Used by analyze_batch() for large batches. The model's ONLY job
+# here is to figure out which pages belong together. Classification
+# happens in step 2 by reusing ANALYSIS_PROMPT per group. Keeping
+# grouping separate reduces cognitive load and improves accuracy.
 
 BATCH_GROUPING_PROMPT = """\
 You receive {num_pages} scanned pages from a mixed stack. Pages from \
@@ -296,6 +371,13 @@ If the document is clean, return:
 SYSTEM_SINGLE = (
     "You are a document classification API. You ONLY output valid JSON objects. "
     "Never output explanations, thinking, or markdown — ONLY the JSON object."
+)
+
+SYSTEM_BATCH_COMBINED = (
+    "You are a document classification API. You ONLY output valid JSON arrays. "
+    "Never output explanations, thinking, or markdown — ONLY the JSON array. "
+    "Read the text on every page to classify correctly. "
+    "Split different document types into separate groups."
 )
 
 SYSTEM_BATCH_GROUPING = (

@@ -111,12 +111,19 @@ def _get_config(**overrides) -> Config:
 
 
 def _usage_delta(before: dict, after: dict) -> dict:
-    """Calculate token usage and cost between two get_usage() snapshots."""
-    from auto_scan.usage import COST_PER_INPUT_TOKEN, COST_PER_OUTPUT_TOKEN
+    """Calculate token usage and cost between two get_usage() snapshots.
+
+    Uses model-aware total_cost when available (records at Opus/Sonnet/Haiku
+    rates per call). Falls back to Sonnet-only calculation for old data.
+    """
     inp = after.get("input_tokens", 0) - before.get("input_tokens", 0)
     out = after.get("output_tokens", 0) - before.get("output_tokens", 0)
     calls = after.get("api_calls", 0) - before.get("api_calls", 0)
-    cost = inp * COST_PER_INPUT_TOKEN + out * COST_PER_OUTPUT_TOKEN
+    # Use model-aware cost delta when available
+    cost = after.get("total_cost", 0.0) - before.get("total_cost", 0.0)
+    if cost <= 0:
+        from auto_scan.usage import COST_PER_INPUT_TOKEN, COST_PER_OUTPUT_TOKEN
+        cost = inp * COST_PER_INPUT_TOKEN + out * COST_PER_OUTPUT_TOKEN
     return {
         "input_tokens": inp,
         "output_tokens": out,

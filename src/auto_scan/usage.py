@@ -15,9 +15,31 @@ _last_api_call: float = 0.0
 # Minimum seconds between API calls
 MIN_API_INTERVAL = 5
 
-# Claude Sonnet 4 pricing (USD per token)
+# Default pricing (Claude Sonnet 4, USD per token)
 COST_PER_INPUT_TOKEN = 3.0 / 1_000_000
 COST_PER_OUTPUT_TOKEN = 15.0 / 1_000_000
+
+# Per-model pricing tiers (USD per token).
+# Keys are substrings matched against model names.
+MODEL_PRICING = {
+    "opus":   {"input": 15.0 / 1_000_000, "output": 75.0 / 1_000_000},
+    "sonnet": {"input":  3.0 / 1_000_000, "output": 15.0 / 1_000_000},
+    "haiku":  {"input": 0.25 / 1_000_000, "output": 1.25 / 1_000_000},
+}
+
+
+def _pricing_for_model(model: str | None) -> tuple[float, float]:
+    """Return (input_rate, output_rate) for a model name.
+
+    Matches by substring: "claude-opus-4-20250514" → opus tier.
+    Falls back to Sonnet pricing if the model name is unknown.
+    """
+    if model:
+        m = model.lower()
+        for tier, rates in MODEL_PRICING.items():
+            if tier in m:
+                return rates["input"], rates["output"]
+    return COST_PER_INPUT_TOKEN, COST_PER_OUTPUT_TOKEN
 
 
 def _usage_path() -> Path:
@@ -40,6 +62,7 @@ def _load_usage() -> dict:
         "input_tokens": 0,
         "output_tokens": 0,
         "api_calls": 0,
+        "total_cost": 0.0,
         "history": [],
     }
 
@@ -52,19 +75,31 @@ def _save_usage(usage: dict) -> None:
     os.chmod(path, 0o600)
 
 
-def record_usage(input_tokens: int, output_tokens: int) -> dict:
-    """Record tokens consumed by an API call. Returns updated usage."""
+def record_usage(input_tokens: int, output_tokens: int,
+                 model: str | None = None) -> dict:
+    """Record tokens consumed by an API call. Returns updated usage.
+
+    When *model* is provided, the cost for this call is computed at
+    the correct per-model rate (Opus, Sonnet, Haiku). Otherwise
+    Sonnet pricing is assumed.
+    """
+    in_rate, out_rate = _pricing_for_model(model)
+    call_cost = input_tokens * in_rate + output_tokens * out_rate
+
     with _lock:
         usage = _load_usage()
         usage["input_tokens"] += input_tokens
         usage["output_tokens"] += output_tokens
         usage["api_calls"] += 1
+        usage["total_cost"] = usage.get("total_cost", 0.0) + call_cost
         if "history" not in usage:
             usage["history"] = []
         usage["history"].append({
             "time": datetime.now().strftime("%H:%M"),
             "input": input_tokens,
             "output": output_tokens,
+            "cost": round(call_cost, 6),
+            "model": model or "unknown",
             "cumulative": usage["input_tokens"] + usage["output_tokens"],
         })
         _save_usage(usage)
@@ -76,10 +111,15 @@ def get_usage() -> dict:
     with _lock:
         usage = _load_usage()
     total = usage["input_tokens"] + usage["output_tokens"]
-    cost = (
-        usage["input_tokens"] * COST_PER_INPUT_TOKEN
-        + usage["output_tokens"] * COST_PER_OUTPUT_TOKEN
-    )
+    # Use pre-computed model-aware total_cost when available;
+    # fall back to Sonnet-only calculation for old usage data.
+    if "total_cost" in usage and usage["total_cost"] > 0:
+        cost = usage["total_cost"]
+    else:
+        cost = (
+            usage["input_tokens"] * COST_PER_INPUT_TOKEN
+            + usage["output_tokens"] * COST_PER_OUTPUT_TOKEN
+        )
     history = usage.get("history", [])
     return {
         **usage,
@@ -129,6 +169,7 @@ def reset_daily_usage() -> None:
             "input_tokens": 0,
             "output_tokens": 0,
             "api_calls": 0,
+            "total_cost": 0.0,
             "history": [],
         }
         _save_usage(usage)

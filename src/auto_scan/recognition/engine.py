@@ -24,12 +24,18 @@ from auto_scan.usage import check_rate_limit, record_usage
 from auto_scan.recognition.prompts import (
     ALL_CATEGORIES,
     ANALYSIS_PROMPT,
+    BATCH_COMBINED_PROMPT,
     BATCH_GROUPING_PROMPT,
     VERIFY_PROMPT,
     SYSTEM_SINGLE,
+    SYSTEM_BATCH_COMBINED,
     SYSTEM_BATCH_GROUPING,
     SYSTEM_VERIFY,
 )
+
+# Batches up to this many pages use a single API call (group + classify).
+# Larger batches use the 2-step pipeline (group → classify per group).
+SINGLE_PASS_THRESHOLD = 10
 
 
 def build_filename(fields: dict, today: str) -> str:
@@ -416,8 +422,8 @@ def _classify_images(
     except anthropic.APIError as e:
         raise AnalysisError(f"Claude API error: {e}") from e
 
-    # Record token usage
-    record_usage(message.usage.input_tokens, message.usage.output_tokens)
+    # Record token usage (model-aware cost)
+    record_usage(message.usage.input_tokens, message.usage.output_tokens, config.claude_model)
     print(
         f"  Tokens: {message.usage.input_tokens:,} in + {message.usage.output_tokens:,} out",
         file=sys.stderr,
@@ -516,7 +522,111 @@ def _repair_truncated_json(text: str) -> str:
     return text  # give up, return as-is
 
 
-# ── Batch analysis (2-step pipeline: group → classify) ────────────
+# ── Batch analysis ────────────────────────────────────────────────
+
+
+def _single_pass_batch(
+    images: list[bytes], config: Config, client: anthropic.Anthropic,
+    redact: bool = False, redact_patterns: set[str] | None = None,
+) -> list[tuple[list[int], DocumentInfo]]:
+    """Group + classify in one API call (for small batches).
+
+    Sends all images once with a combined prompt that handles both
+    page grouping and per-group classification. This halves the token
+    cost compared to the 2-step pipeline but puts more cognitive load
+    on the model, which is fine for ≤ SINGLE_PASS_THRESHOLD pages.
+    """
+    check_rate_limit()
+    print("  Computing page grouping hints...", file=sys.stderr)
+    page_hints = _compute_page_hints(images)
+    if page_hints:
+        print(f"  Hints ready ({page_hints.count(chr(10))} lines)", file=sys.stderr)
+
+    content: list[dict] = []
+    for i, img_data in enumerate(images):
+        safe_img = _maybe_redact(img_data, redact, redact_patterns)
+        labeled = _label_page(safe_img, i + 1, max_dim=1568)
+        b64 = base64.standard_b64encode(labeled).decode("ascii")
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+
+    prompt_text = BATCH_COMBINED_PROMPT.format(
+        today=date.today().isoformat(),
+        categories=", ".join(ALL_CATEGORIES),
+        num_pages=len(images),
+    )
+    if page_hints:
+        prompt_text += page_hints
+    content.append({"type": "text", "text": prompt_text})
+
+    try:
+        message = client.messages.create(
+            model=config.claude_model,
+            max_tokens=8192,
+            system=SYSTEM_BATCH_COMBINED,
+            messages=[
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "["},
+            ],
+        )
+    except anthropic.APITimeoutError as e:
+        raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
+    except anthropic.APIError as e:
+        raise AnalysisError(f"Claude API error: {e}") from e
+
+    record_usage(message.usage.input_tokens, message.usage.output_tokens, config.claude_model)
+    print(
+        f"  Tokens: {message.usage.input_tokens:,} in + "
+        f"{message.usage.output_tokens:,} out",
+        file=sys.stderr,
+    )
+
+    # Parse response — prepend "[" from assistant prefill
+    response_text = ""
+    for block in message.content:
+        if hasattr(block, "text"):
+            response_text += block.text
+    response_text = "[" + response_text.strip()
+
+    if response_text == "[":
+        stop = message.stop_reason
+        raise AnalysisError(
+            f"Empty response (stop_reason={stop}). "
+            f"The batch may be too large — try scanning fewer pages."
+        )
+
+    # Strip markdown fences
+    if response_text.startswith("```"):
+        lines = response_text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        response_text = "\n".join(lines).strip()
+
+    if message.stop_reason == "max_tokens":
+        print("  Warning: response truncated, attempting repair", file=sys.stderr)
+        response_text = _repair_truncated_json(response_text)
+
+    try:
+        data = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        preview = response_text[:500] if response_text else "(empty)"
+        raise AnalysisError(
+            f"Failed to parse batch response: {e}\nPreview: {preview}"
+        ) from e
+
+    if not isinstance(data, list):
+        if isinstance(data, dict) and "pages" in data:
+            data = [data]
+        else:
+            raise AnalysisError(
+                f"Expected JSON array, got {type(data).__name__}"
+            )
+
+    return _parse_batch_results(data)
 
 
 def _group_pages(
@@ -571,7 +681,7 @@ def _group_pages(
     except anthropic.APIError as e:
         raise AnalysisError(f"Claude API error during page grouping: {e}") from e
 
-    record_usage(message.usage.input_tokens, message.usage.output_tokens)
+    record_usage(message.usage.input_tokens, message.usage.output_tokens, config.claude_model)
     print(
         f"  Grouping tokens: {message.usage.input_tokens:,} in + "
         f"{message.usage.output_tokens:,} out",
@@ -681,12 +791,13 @@ def analyze_batch(
     images: list[bytes], config: Config,
     redact: bool = False, redact_patterns: set[str] | None = None,
 ) -> list[tuple[list[int], DocumentInfo]]:
-    """Analyze a batch of scanned pages using a 2-step pipeline.
+    """Analyze a batch of scanned pages.
 
-    Pipeline:
-        1. Group pages  — AI determines which pages belong to the same document
-        2. Classify each group — reuses single-doc ANALYSIS_PROMPT per group
-        3. Verify uncertain  — Opus + extended thinking for low-confidence groups
+    Strategy:
+        ≤ SINGLE_PASS_THRESHOLD pages → single-pass (group + classify in one call)
+        > SINGLE_PASS_THRESHOLD pages → 2-step (group first, then classify each)
+
+    Both paths share the verification step for uncertain pages.
 
     Returns a list of (page_indices, DocumentInfo) tuples where page_indices
     are 0-based indices into the images list.
@@ -697,6 +808,49 @@ def analyze_batch(
     print(f"Batch analyzing {len(images)} pages...", file=sys.stderr)
     client = anthropic.Anthropic(api_key=config.api_key, timeout=180.0)
 
+    if len(images) <= SINGLE_PASS_THRESHOLD:
+        # ── Single-pass: group + classify in one API call ────────
+        print(f"  Using single-pass mode (≤{SINGLE_PASS_THRESHOLD} pages)", file=sys.stderr)
+        results = _single_pass_batch(images, config, client, redact, redact_patterns)
+    else:
+        # ── 2-step pipeline: group, then classify each ──────────
+        print(f"  Using 2-step mode (>{SINGLE_PASS_THRESHOLD} pages)", file=sys.stderr)
+        results = _two_step_batch(images, config, client, redact, redact_patterns)
+
+    # ── Verify uncertain pages (shared by both paths) ────────────
+    CONFIDENCE_THRESHOLD = 90
+    uncertain_pages = []
+    for pages, doc_info in results:
+        for p in pages:
+            page_num = p + 1
+            pc = doc_info.page_confidence.get(page_num, doc_info.confidence)
+            if pc < CONFIDENCE_THRESHOLD:
+                uncertain_pages.append(page_num)
+
+    if uncertain_pages:
+        print(
+            f"  Verification: {len(uncertain_pages)} uncertain page(s) "
+            f"(confidence < {CONFIDENCE_THRESHOLD}%), running verification...",
+            file=sys.stderr,
+        )
+        results = _verify_uncertain_pages(
+            images, results, uncertain_pages, config, client,
+            redact=redact, redact_patterns=redact_patterns,
+        )
+
+    print(f"Detected {len(results)} document(s)", file=sys.stderr)
+    return results
+
+
+def _two_step_batch(
+    images: list[bytes], config: Config, client: anthropic.Anthropic,
+    redact: bool = False, redact_patterns: set[str] | None = None,
+) -> list[tuple[list[int], DocumentInfo]]:
+    """2-step pipeline: group pages first, then classify each group separately.
+
+    More accurate for large batches (>SINGLE_PASS_THRESHOLD pages) where
+    the model benefits from focusing on one task at a time.
+    """
     # ── Step 1: Group pages ──────────────────────────────────────
     print("  Step 1: Grouping pages...", file=sys.stderr)
     groups = _group_pages(images, config, client, redact, redact_patterns)
@@ -730,28 +884,6 @@ def analyze_batch(
         print(f"      → {doc_info.filename}", file=sys.stderr)
         results.append((page_indices, doc_info))
 
-    # ── Step 3: Verify uncertain pages ───────────────────────────
-    CONFIDENCE_THRESHOLD = 90
-    uncertain_pages = []
-    for pages, doc_info in results:
-        for p in pages:
-            page_num = p + 1
-            pc = doc_info.page_confidence.get(page_num, doc_info.confidence)
-            if pc < CONFIDENCE_THRESHOLD:
-                uncertain_pages.append(page_num)
-
-    if uncertain_pages:
-        print(
-            f"  Step 3: {len(uncertain_pages)} uncertain page(s) "
-            f"(confidence < {CONFIDENCE_THRESHOLD}%), running verification...",
-            file=sys.stderr,
-        )
-        results = _verify_uncertain_pages(
-            images, results, uncertain_pages, config, client,
-            redact=redact, redact_patterns=redact_patterns,
-        )
-
-    print(f"Detected {len(results)} document(s)", file=sys.stderr)
     return results
 
 
@@ -861,7 +993,7 @@ def _verify_uncertain_pages(
     # Cache tokens may be available
     cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-    record_usage(in_tok, out_tok)
+    record_usage(in_tok, out_tok, verify_model)
     extra = ""
     if cache_create or cache_read:
         extra = f" (cache: +{cache_create:,} create, {cache_read:,} read)"
