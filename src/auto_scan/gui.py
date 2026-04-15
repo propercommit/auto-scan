@@ -16,7 +16,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template_string, request
 from PIL import Image
 
-from auto_scan import AutoScanError
+from auto_scan import AutoScanError, ScanError, ScannerBusyError
 from auto_scan.analyzer import ALL_CATEGORIES, DocumentInfo, analyze_batch, analyze_document
 from auto_scan.config import Config, load_config
 from auto_scan.dedup import image_hash
@@ -851,8 +851,53 @@ def _run_scan_job(data: dict, mode: str):
 
     except Exception as e:
         _log(f"Error: {e}")
+        error_info: dict = {"ok": False, "error": str(e)}
+
+        # Classify the error type for the frontend
+        if isinstance(e, ScannerBusyError):
+            error_info["error_type"] = "busy"
+            error_info["hint"] = "The scanner is busy with another job. Wait for it to finish and try again."
+        elif isinstance(e, ScanError):
+            error_info["error_type"] = "scanner"
+            error_info["hint"] = "A scanner error occurred. Check the scanner for paper jams or other issues, then try again."
+        elif isinstance(e, AutoScanError):
+            error_info["error_type"] = "app"
+            error_info["hint"] = str(e)
+        else:
+            error_info["error_type"] = "unknown"
+            error_info["hint"] = "An unexpected error occurred. Check the log for details."
+
+        # Try to re-check scanner state for more specific info
+        try:
+            with _state_lock:
+                info = state.get("scanner_info")
+            if info:
+                with ESCLClient(info.base_url) as client:
+                    status = client.get_status()
+                    error_info["scanner_state"] = status.state
+                    error_info["adf_state"] = status.adf_state
+                    # Provide specific guidance based on scanner state
+                    if status.adf_state and "Jam" in status.adf_state:
+                        error_info["hint"] = "Paper jam detected! Open the scanner, clear the jammed paper, and try again."
+                        error_info["error_type"] = "jam"
+                    elif status.adf_state and "Empty" in status.adf_state:
+                        error_info["hint"] = "The document feeder is empty. Load your documents and try again."
+                        error_info["error_type"] = "empty"
+                    elif status.adf_state and "Mispick" in status.adf_state:
+                        error_info["hint"] = "The scanner failed to pick up the paper. Re-align your documents and try again."
+                        error_info["error_type"] = "mispick"
+                    elif status.state == "Stopped":
+                        error_info["hint"] = "The scanner has stopped. Check for errors on the scanner display, resolve them, and try again."
+                        error_info["error_type"] = "stopped"
+                    elif status.state == "Processing":
+                        error_info["hint"] = "The scanner is still processing. Wait a moment and try again."
+                        error_info["error_type"] = "busy"
+                    _log(f"Scanner state after error: {status.state}, ADF: {status.adf_state}")
+        except Exception:
+            pass  # Scanner unreachable — use the original error info
+
         with _state_lock:
-            state["job"] = {"status": "error", "result": {"ok": False, "error": str(e)}}
+            state["job"] = {"status": "error", "result": error_info}
 
 
 @app.route("/api/scan", methods=["POST"])
@@ -1281,6 +1326,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .risk-alert.risk-low { background: #fff3cd; border: 1px solid #cc9a06; color: #664d03; }
   .risk-alert.risk-medium { background: #ffe0cc; border: 1px solid #c35a02; color: #471a00; }
   .risk-alert.risk-high { background: #f8d7da; border: 1px solid var(--red); color: #6a1a21; }
+  .error-card { border: 1px solid var(--red); background: #fef2f2; text-align: center; }
+  .error-card h2 { color: #991b1b; margin-bottom: 8px; }
+  .error-card-icon { font-size: 48px; margin-bottom: 8px; line-height: 1; }
+  .error-card-message { color: #7f1d1d; font-size: 14px; margin-bottom: 6px; font-family: var(--mono); background: #fff5f5; border-radius: var(--radius); padding: 10px 14px; word-break: break-word; }
+  .error-card-hint { color: #991b1b; font-size: 15px; font-weight: 600; margin-bottom: 14px; }
+  .error-card-state { font-size: 13px; color: var(--gray); margin-bottom: 14px; font-family: var(--mono); }
+  .error-card-actions { display: flex; gap: 10px; justify-content: center; }
   .risk-alert h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
   .risk-alert ul { margin: 4px 0 0 16px; padding: 0; }
   .risk-alert li { margin-bottom: 2px; }
@@ -1630,6 +1682,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
       </div>
       <div class="redact-alert" id="redact-alert" style="display:none"></div>
+    </div>
+  </div>
+
+  <div class="card error-card" id="error-card" style="display:none" aria-live="assertive">
+    <div class="error-card-icon" id="error-card-icon"></div>
+    <h2 id="error-card-title">Scanner Error</h2>
+    <p class="error-card-message" id="error-card-message"></p>
+    <p class="error-card-hint" id="error-card-hint"></p>
+    <div class="error-card-state" id="error-card-state" style="display:none"></div>
+    <div class="error-card-actions">
+      <button class="btn btn-primary" onclick="retryLastScan()">Try Again</button>
+      <button class="btn btn-secondary" onclick="dismissError()">Dismiss</button>
     </div>
   </div>
 
@@ -2207,49 +2271,52 @@ function disconnect() {
 }
 
 async function scanOnly() {
+  _lastScanFn = scanOnly; dismissError();
   setBusy(true, 'scanning'); $('#results-card').style.display = 'none';
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: false}) });
     const start = await res.json();
-    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
-    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
     else if (job.status === 'done' && job.result) { showResult({folder: 'unsorted', tags: [], filename: (job.result.output_path || '').split(/[/\\]/).pop(), summary: 'Saved without classification', path: job.result.output_path}); }
-  } catch(e) { alert('Failed: ' + e.message); }
+  } catch(e) { showScanError({result: {error: e.message, error_type: 'unknown', hint: 'Connection to the scanner service failed. Check that the app is running.'}}); }
   setBusy(false); refreshLog();
 }
 
 function doScan() { return currentMode === 'auto' ? doScanAuto() : doScanAssisted(); }
 
 async function doScanAuto() {
+  _lastScanFn = doScanAuto; dismissError();
   setBusy(true, 'scanning'); $('#results-card').style.display = 'none';
   try {
     const res = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), classify: true}) });
     const start = await res.json();
-    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
-    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
     else if (job.status === 'done' && job.result && job.result.classified) {
       const d = job.result;
       showResult({folder: d.category, tags: d.tags || [d.category], filename: d.filename, summary: d.summary, date: d.date, path: d.output_path, riskLevel: d.risk_level, risks: d.risks});
     }
-  } catch(e) { alert('Failed: ' + e.message); }
+  } catch(e) { showScanError({result: {error: e.message, error_type: 'unknown', hint: 'Connection to the scanner service failed. Check that the app is running.'}}); }
   setBusy(false); refreshLog();
 }
 
 async function doScanAssisted() {
+  _lastScanFn = doScanAssisted; dismissError();
   setBusy(true, 'scanning'); $('#results-card').style.display = 'none';
   try {
     const res = await fetch('/api/scan-assisted', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(getScanParams()) });
     const start = await res.json();
-    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
-    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'duplicate') { alert('Duplicate detected: this document was previously saved as ' + (job.result.previous && job.result.previous.filename || 'unknown')); }
     else if (job.status === 'done' && job.result && job.result.ok) { showClassifyModal(job.result); }
-  } catch(e) { alert('Failed: ' + e.message); }
+  } catch(e) { showScanError({result: {error: e.message, error_type: 'unknown', hint: 'Connection to the scanner service failed. Check that the app is running.'}}); }
   setBusy(false); refreshLog();
 }
 
@@ -2642,6 +2709,7 @@ let allPreviews = []; // Base64 thumbs for every scanned page
 let pageRedactions = {}; // {pageNum: {count, types}} from OCR privacy check
 
 async function doBatchScan() {
+  _lastScanFn = doBatchScan; dismissError();
   setBusy(true, 'scanning');
   $('#results-card').style.display = 'none';
   $('#batch-results-card').style.display = 'none';
@@ -2649,13 +2717,13 @@ async function doBatchScan() {
     // Batch always shows review modal for page rearrangement
     const res = await fetch('/api/scan-batch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...getScanParams(), auto: false}) });
     const start = await res.json();
-    if (!start.ok) { alert('Error: ' + start.error); setBusy(false); return; }
+    if (!start.ok) { showScanError({result: {error: start.error, error_type: 'app', hint: start.error}}); setBusy(false); return; }
     const job = await pollJob();
-    if (job.status === 'error') { alert('Error: ' + (job.result && job.result.error || 'Unknown error')); }
+    if (job.status === 'error') { showScanError(job); }
     else if (job.status === 'done' && job.result && job.result.batch) {
       showBatchModal(job.result);
     }
-  } catch(e) { alert('Failed: ' + e.message); }
+  } catch(e) { showScanError({result: {error: e.message, error_type: 'unknown', hint: 'Connection to the scanner service failed. Check that the app is running.'}}); }
   setBusy(false); refreshLog();
 }
 
@@ -2971,7 +3039,43 @@ async function saveBatch() {
   refreshLog();
 }
 
+// ── Error handling ─────────────────────────────────────────────────
+let _lastScanFn = null; // Store last scan function for retry
+
+function showScanError(job) {
+  const result = job.result || {};
+  const errorType = result.error_type || 'unknown';
+  const icons = {jam: '\u26d4', empty: '\ud83d\udce5', mispick: '\u26a0\ufe0f', busy: '\u23f3', stopped: '\ud83d\uded1', scanner: '\u26a0\ufe0f', app: '\u2139\ufe0f', unknown: '\u274c'};
+  const titles = {jam: 'Paper Jam', empty: 'Feeder Empty', mispick: 'Paper Mispick', busy: 'Scanner Busy', stopped: 'Scanner Stopped', scanner: 'Scanner Error', app: 'Error', unknown: 'Error'};
+
+  $('#error-card-icon').textContent = icons[errorType] || icons.unknown;
+  $('#error-card-title').textContent = titles[errorType] || 'Scanner Error';
+  $('#error-card-message').textContent = result.error || 'Unknown error';
+  $('#error-card-hint').textContent = result.hint || 'Check the scanner and try again.';
+
+  const stateEl = $('#error-card-state');
+  if (result.scanner_state) {
+    stateEl.textContent = 'Scanner: ' + result.scanner_state + (result.adf_state ? ' | ADF: ' + result.adf_state : '');
+    stateEl.style.display = '';
+  } else {
+    stateEl.style.display = 'none';
+  }
+
+  $('#error-card').style.display = '';
+  $('#error-card').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+
+function dismissError() {
+  $('#error-card').style.display = 'none';
+}
+
+function retryLastScan() {
+  dismissError();
+  if (_lastScanFn) _lastScanFn();
+}
+
 function scanNext() {
+  dismissError();
   $('#results-card').style.display = 'none';
   $('#batch-results-card').style.display = 'none';
   // Reset result fields
