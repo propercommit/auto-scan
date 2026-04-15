@@ -1007,6 +1007,75 @@ def api_original_image(page_num):
     return Response(thumb, mimetype="image/jpeg")
 
 
+@app.route("/api/rotate-page", methods=["POST"])
+def api_rotate_page():
+    """Rotate a pending page image. Accepts page_num (1-indexed) and degrees (90, 180, 270)."""
+    data = request.json or {}
+    page_num = data.get("page_num", 0)
+    degrees = data.get("degrees", 90)
+    if degrees not in (90, 180, 270):
+        return jsonify({"ok": False, "error": "Degrees must be 90, 180, or 270"}), 400
+
+    with _state_lock:
+        images = state.get("pending_images")
+    if not images or page_num < 1 or page_num > len(images):
+        return jsonify({"ok": False, "error": "Page not found"}), 404
+
+    idx = page_num - 1
+    img = _open_image(images[idx])
+    # PIL rotate is counter-clockwise, we want clockwise
+    rotated = img.rotate(-degrees, expand=True)
+    buf = io.BytesIO()
+    rotated.save(buf, format="JPEG", quality=95)
+    new_bytes = buf.getvalue()
+
+    with _state_lock:
+        state["pending_images"][idx] = new_bytes
+
+    # Regenerate thumbnail for preview
+    thumb = _make_thumbnail(new_bytes, max_dim=300)
+    preview_b64 = base64.b64encode(thumb).decode("ascii")
+    _log(f"Rotated page {page_num} by {degrees}\u00b0")
+    return jsonify({"ok": True, "preview": preview_b64})
+
+
+@app.route("/api/crop-page", methods=["POST"])
+def api_crop_page():
+    """Crop a pending page image. Accepts page_num and crop box as fractions (0-1)."""
+    data = request.json or {}
+    page_num = data.get("page_num", 0)
+    # Crop box as fractions of image dimensions
+    left = float(data.get("left", 0))
+    top = float(data.get("top", 0))
+    right = float(data.get("right", 1))
+    bottom = float(data.get("bottom", 1))
+
+    if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
+        return jsonify({"ok": False, "error": "Invalid crop box"}), 400
+
+    with _state_lock:
+        images = state.get("pending_images")
+    if not images or page_num < 1 or page_num > len(images):
+        return jsonify({"ok": False, "error": "Page not found"}), 404
+
+    idx = page_num - 1
+    img = _open_image(images[idx])
+    w, h = img.size
+    box = (int(left * w), int(top * h), int(right * w), int(bottom * h))
+    cropped = img.crop(box)
+    buf = io.BytesIO()
+    cropped.save(buf, format="JPEG", quality=95)
+    new_bytes = buf.getvalue()
+
+    with _state_lock:
+        state["pending_images"][idx] = new_bytes
+
+    thumb = _make_thumbnail(new_bytes, max_dim=300)
+    preview_b64 = base64.b64encode(thumb).decode("ascii")
+    _log(f"Cropped page {page_num}")
+    return jsonify({"ok": True, "preview": preview_b64})
+
+
 @app.route("/api/save-classified", methods=["POST"])
 def api_save_classified():
     """Save pending scanned images with folder + tags."""
@@ -1360,6 +1429,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .batch-page:hover img { border-color: var(--primary); }
   .batch-page span { display: block; font-size: 13px; font-weight: 600; color: var(--gray); margin-top: 4px; }
   .batch-page select { width: 100%; font-size: 13px; padding: 4px 6px; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 4px; cursor: pointer; background: #fff; color: #212529; }
+  .page-actions { position: absolute; top: 2px; right: 2px; display: flex; gap: 2px; opacity: 0; transition: opacity var(--transition); z-index: 2; }
+  .batch-page:hover .page-actions { opacity: 1; }
+  .page-action-btn { width: 22px; height: 22px; border: none; border-radius: 4px; background: rgba(0,0,0,.6); color: #fff; font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1; transition: background var(--transition); }
+  .page-action-btn:hover { background: rgba(0,0,0,.85); }
   .batch-page-grid-empty { color: var(--gray-light); font-size: 14px; font-style: italic; padding: 16px; text-align: center; width: 100%; }
   .btn-add-doc { background: none; border: 2px dashed var(--border); border-radius: var(--radius); padding: 10px; width: 100%; font-size: 13px; font-weight: 600; color: var(--gray); cursor: pointer; transition: border-color var(--transition), color var(--transition); font-family: var(--font); margin-bottom: 8px; }
   .btn-add-doc:hover { border-color: var(--primary); color: var(--primary); }
@@ -1369,7 +1442,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .btn-scan-next { margin-top: 16px; width: 100%; padding: 12px 20px; font-size: 15px; font-weight: 700; }
   .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 200; align-items: center; justify-content: center; flex-direction: column; cursor: pointer; }
   .lightbox.active { display: flex; }
-  .lightbox img { max-width: min(92vw, 1200px); max-height: 85vh; border-radius: var(--radius); box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; }
+  .lightbox-img-wrap { position: relative; display: inline-block; }
+  .lightbox-img-wrap img { max-width: min(92vw, 1200px); max-height: 75vh; border-radius: var(--radius); box-shadow: 0 8px 40px rgba(0,0,0,.5); object-fit: contain; display: block; }
+  .lightbox-toolbar { display: flex; gap: 8px; margin-bottom: 12px; z-index: 2; }
+  .lightbox-tool { background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.25); color: #fff; font-size: 14px; font-weight: 600; padding: 6px 14px; border-radius: 6px; cursor: pointer; transition: background var(--transition); font-family: var(--font); }
+  .lightbox-tool:hover { background: rgba(255,255,255,.3); }
+  .lightbox-tool-danger:hover { background: rgba(220,38,38,.7); }
+  .lightbox-crop-bar { display: flex; gap: 8px; margin-top: 10px; z-index: 2; }
+  .crop-overlay { position: absolute; inset: 0; z-index: 3; cursor: crosshair; }
+  .crop-box { position: absolute; border: 2px dashed #fff; background: rgba(59,130,246,.15); box-shadow: 0 0 0 9999px rgba(0,0,0,.5); pointer-events: none; }
   .lightbox-label { color: #fff; font-size: 15px; font-weight: 600; margin-top: 12px; }
   .redact-preview-split { display: flex; gap: 20px; align-items: flex-start; max-width: 95vw; width: 95vw; }
   .redact-preview-pane { flex: 1; text-align: center; min-width: 0; }
@@ -1794,7 +1875,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button class="lightbox-close" onclick="closeLightbox()" aria-label="Close preview">&times;</button>
   <button class="lightbox-nav lightbox-prev" onclick="lightboxNav(-1)" aria-label="Previous page">&#8249;</button>
   <button class="lightbox-nav lightbox-next" onclick="lightboxNav(1)" aria-label="Next page">&#8250;</button>
-  <img id="lightbox-img" src="" alt="Full page preview">
+  <div class="lightbox-toolbar" id="lightbox-toolbar">
+    <button class="lightbox-tool" onclick="lightboxRotate()" title="Rotate 90\u00b0">&#x21bb; Rotate</button>
+    <button class="lightbox-tool" onclick="lightboxStartCrop()" id="btn-crop" title="Crop page">&#x2702; Crop</button>
+    <button class="lightbox-tool lightbox-tool-danger" onclick="lightboxDelete()" title="Delete page">&#x2715; Delete</button>
+  </div>
+  <div class="lightbox-img-wrap" id="lightbox-img-wrap">
+    <img id="lightbox-img" src="" alt="Full page preview">
+    <div class="crop-overlay" id="crop-overlay" style="display:none">
+      <div class="crop-box" id="crop-box"></div>
+    </div>
+  </div>
+  <div class="lightbox-crop-bar" id="lightbox-crop-bar" style="display:none">
+    <button class="btn btn-primary" onclick="lightboxApplyCrop()">Apply Crop</button>
+    <button class="btn btn-secondary" onclick="lightboxCancelCrop()">Cancel</button>
+  </div>
   <div class="lightbox-label" id="lightbox-label"></div>
 </div>
 
@@ -2828,6 +2923,10 @@ function renderBatchDocs(skipSync) {
       const ocrBadge = pr ? '<span class="ocr-badge" title="' + pr.count + ' region(s) redacted: ' + (pr.types||[]).join(', ') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>OCR</span>' : '';
       pagesHtml += '<div class="batch-page" draggable="true" data-page="' + pNum + '" data-doc="' + i + '">' +
         pcBadge + ocrBadge +
+        '<div class="page-actions">' +
+          '<button class="page-action-btn" onclick="rotatePage(' + pNum + ',' + i + ')" title="Rotate 90\u00b0">\u21bb</button>' +
+          '<button class="page-action-btn" onclick="deletePage(' + pNum + ',' + i + ')" title="Delete page">\u2715</button>' +
+        '</div>' +
         '<img src="data:image/jpeg;base64,' + preview + '" alt="Page ' + pNum + '" onclick="openLightbox(' + pNum + ',' + i + ')" title="Click to preview" style="cursor:zoom-in" draggable="false">' +
         '<span>Page ' + pNum + '</span>' +
         '<select class="batch-page-move" data-page="' + pNum + '" data-doc="' + i + '" aria-label="Move page ' + pNum + '">' + moveOpts + '</select>' +
@@ -2861,7 +2960,7 @@ function renderBatchDocs(skipSync) {
           '<span class="batch-doc-label">' + esc(docShortName(doc, i)) + (doc.summary ? ' \u2014 ' + esc(doc.summary) : '') + '</span>' +
           '<span class="confidence-badge confidence-' + confClass + '" title="AI confidence in document grouping">' + conf + '%</span>' +
           ocrDocBadge +
-          (pages.length === 0 ? '<button class="btn-remove-doc" onclick="removeBatchDoc(' + i + ')">Remove</button>' : '') +
+          '<button class="btn-remove-doc" onclick="removeBatchDoc(' + i + ')">Remove</button>' +
         '</div>' +
       '</div>' +
       '<div class="batch-page-grid" data-doc="' + i + '">' + pagesHtml + '</div>' +
@@ -2929,12 +3028,15 @@ function addBatchDocument() {
 }
 
 function removeBatchDoc(idx) {
-  if (batchPages[idx] && batchPages[idx].length > 0) return; // Can't remove doc with pages
-  syncBatchEdits(); // sync while DOM indices still match data
+  const pages = batchPages[idx] || [];
+  if (pages.length > 0) {
+    if (!confirm('Delete this document and its ' + pages.length + ' page(s)? The pages will be removed.')) return;
+  }
+  syncBatchEdits();
   batchData.splice(idx, 1);
   batchTags.splice(idx, 1);
   batchPages.splice(idx, 1);
-  renderBatchDocs(true); // skip re-sync since indices shifted
+  renderBatchDocs(true);
 }
 
 function addBatchTag(docIdx) {
@@ -3096,8 +3198,10 @@ function scanNext() {
 // ── Lightbox (fullscreen page preview) ──────────────────────────────
 let lightboxPages = []; // Ordered list of page numbers available in lightbox
 let lightboxIdx = 0;    // Current index within lightboxPages
+let lightboxDocIdx = null; // Which document owns the current lightbox view
 
 function openLightbox(pageNum, docIdx) {
+  lightboxDocIdx = docIdx != null ? docIdx : null;
   // Navigate only within the document's own pages
   if (docIdx != null && batchPages[docIdx]) {
     lightboxPages = [...batchPages[docIdx]].sort((a, b) => a - b);
@@ -3120,16 +3224,146 @@ function openLightbox(pageNum, docIdx) {
 
 function showLightboxPage() {
   const pNum = lightboxPages[lightboxIdx];
-  $('#lightbox-img').src = '/api/page-image/' + pNum;
+  $('#lightbox-img').src = '/api/page-image/' + pNum + '?t=' + Date.now();
   $('#lightbox-img').alt = 'Page ' + pNum;
   $('#lightbox-label').textContent = 'Page ' + pNum + ' (' + (lightboxIdx + 1) + '/' + lightboxPages.length + ')';
+  // Show toolbar only when there are pending images to edit (batch or classify mode)
+  const showTools = batchPages.length > 0 || classifyPageCount > 0;
+  $('#lightbox-toolbar').style.display = showTools ? 'flex' : 'none';
+  lightboxCancelCrop();
 }
 
-function closeLightbox() { $('#lightbox').classList.remove('active'); if (!document.querySelector('.modal-overlay.active')) mainContent.removeAttribute('inert'); }
+function closeLightbox() {
+  lightboxCancelCrop();
+  $('#lightbox').classList.remove('active');
+  if (!document.querySelector('.modal-overlay.active')) mainContent.removeAttribute('inert');
+}
 
 function lightboxNav(dir) {
   lightboxIdx = (lightboxIdx + dir + lightboxPages.length) % lightboxPages.length;
   showLightboxPage();
+}
+
+// ── Page editing (rotate, crop, delete) ──────────────────────────
+async function rotatePage(pageNum, docIdx) {
+  try {
+    const res = await fetch('/api/rotate-page', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({page_num: pageNum, degrees: 90}) });
+    const data = await res.json();
+    if (data.ok && data.preview) {
+      allPreviews[pageNum - 1] = data.preview;
+      renderBatchDocs();
+    }
+  } catch(e) {}
+}
+
+function deletePage(pageNum, docIdx) {
+  if (!confirm('Delete page ' + pageNum + '?')) return;
+  const idx = batchPages[docIdx].indexOf(pageNum);
+  if (idx !== -1) batchPages[docIdx].splice(idx, 1);
+  renderBatchDocs();
+}
+
+async function lightboxRotate() {
+  const pNum = lightboxPages[lightboxIdx];
+  try {
+    const res = await fetch('/api/rotate-page', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({page_num: pNum, degrees: 90}) });
+    const data = await res.json();
+    if (data.ok) {
+      if (data.preview) allPreviews[pNum - 1] = data.preview;
+      showLightboxPage();
+      if (batchPages.length > 0) renderBatchDocs();
+    }
+  } catch(e) {}
+}
+
+function lightboxDelete() {
+  const pNum = lightboxPages[lightboxIdx];
+  if (!confirm('Delete page ' + pNum + '?')) return;
+  // Remove from whichever document owns it
+  if (lightboxDocIdx != null && batchPages[lightboxDocIdx]) {
+    const idx = batchPages[lightboxDocIdx].indexOf(pNum);
+    if (idx !== -1) batchPages[lightboxDocIdx].splice(idx, 1);
+  } else {
+    // Find it in any doc
+    for (let d = 0; d < batchPages.length; d++) {
+      const idx = batchPages[d].indexOf(pNum);
+      if (idx !== -1) { batchPages[d].splice(idx, 1); break; }
+    }
+  }
+  lightboxPages.splice(lightboxIdx, 1);
+  if (lightboxPages.length === 0) {
+    closeLightbox();
+  } else {
+    if (lightboxIdx >= lightboxPages.length) lightboxIdx = lightboxPages.length - 1;
+    showLightboxPage();
+  }
+  if (batchPages.length > 0) renderBatchDocs();
+}
+
+// ── Crop ──────────────────────────────────────────────────────────
+let _cropping = false;
+let _cropStart = null;
+let _cropBox = null;
+
+function lightboxStartCrop() {
+  _cropping = true;
+  _cropBox = null;
+  const overlay = $('#crop-overlay');
+  const box = $('#crop-box');
+  overlay.style.display = 'block';
+  box.style.cssText = 'display:none';
+  $('#lightbox-crop-bar').style.display = 'flex';
+  $('#btn-crop').style.background = 'rgba(59,130,246,.6)';
+
+  overlay.onmousedown = function(e) {
+    const rect = overlay.getBoundingClientRect();
+    _cropStart = {x: e.clientX - rect.left, y: e.clientY - rect.top};
+    box.style.display = 'block';
+    box.style.left = _cropStart.x + 'px';
+    box.style.top = _cropStart.y + 'px';
+    box.style.width = '0'; box.style.height = '0';
+  };
+  overlay.onmousemove = function(e) {
+    if (!_cropStart) return;
+    const rect = overlay.getBoundingClientRect();
+    const cx = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    const cy = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+    const x = Math.min(_cropStart.x, cx), y = Math.min(_cropStart.y, cy);
+    const w = Math.abs(cx - _cropStart.x), h = Math.abs(cy - _cropStart.y);
+    box.style.left = x + 'px'; box.style.top = y + 'px';
+    box.style.width = w + 'px'; box.style.height = h + 'px';
+    _cropBox = {x, y, w, h, ow: rect.width, oh: rect.height};
+  };
+  overlay.onmouseup = function() { _cropStart = null; };
+}
+
+function lightboxCancelCrop() {
+  _cropping = false; _cropStart = null; _cropBox = null;
+  const overlay = $('#crop-overlay');
+  if (overlay) { overlay.style.display = 'none'; overlay.onmousedown = null; overlay.onmousemove = null; overlay.onmouseup = null; }
+  const bar = $('#lightbox-crop-bar');
+  if (bar) bar.style.display = 'none';
+  const btn = $('#btn-crop');
+  if (btn) btn.style.background = '';
+}
+
+async function lightboxApplyCrop() {
+  if (!_cropBox || _cropBox.w < 5 || _cropBox.h < 5) { alert('Draw a crop area first.'); return; }
+  const pNum = lightboxPages[lightboxIdx];
+  const left = _cropBox.x / _cropBox.ow;
+  const top = _cropBox.y / _cropBox.oh;
+  const right = (_cropBox.x + _cropBox.w) / _cropBox.ow;
+  const bottom = (_cropBox.y + _cropBox.h) / _cropBox.oh;
+  try {
+    const res = await fetch('/api/crop-page', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({page_num: pNum, left, top, right, bottom}) });
+    const data = await res.json();
+    if (data.ok) {
+      if (data.preview) allPreviews[pNum - 1] = data.preview;
+      lightboxCancelCrop();
+      showLightboxPage();
+      if (batchPages.length > 0) renderBatchDocs();
+    } else { alert('Crop failed: ' + data.error); }
+  } catch(e) { alert('Crop failed: ' + e.message); }
 }
 
 // ── Redaction preview (before/after comparison) ────────────────────
@@ -3186,7 +3420,7 @@ document.addEventListener('keydown', e => {
 }, true);
 
 // Click lightbox background to close (but not on image or buttons)
-$('#lightbox').addEventListener('click', e => { if (e.target === $('#lightbox')) closeLightbox(); });
+$('#lightbox').addEventListener('click', e => { if (e.target === $('#lightbox') && !_cropping) closeLightbox(); });
 
 // Keyboard: Escape closes modals / lightbox, arrows navigate lightbox
 document.addEventListener('keydown', e => {
