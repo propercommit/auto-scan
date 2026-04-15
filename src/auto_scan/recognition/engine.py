@@ -32,6 +32,51 @@ from auto_scan.recognition.prompts import (
 )
 
 
+def build_filename(fields: dict, today: str) -> str:
+    """Build a deterministic filename from structured document fields.
+
+    Pattern: {date}_{category}_{issuer}_{subject}[_{ref}].pdf
+
+    The model returns structured fields (issuer, subject, ref_number);
+    this function assembles them into a consistent filename. This avoids
+    model hallucination of filename formats and ensures deterministic output.
+
+    Examples:
+        >>> build_filename({"date": "2024-03-15", "category": "invoice",
+        ...     "issuer": "Vodafone", "subject": "mobile_bill_march"}, "2025-01-01")
+        '2024-03-15_invoice_vodafone_mobile_bill_march.pdf'
+    """
+    def _slug(s: str, max_len: int = 40) -> str:
+        """Normalize a string into a filename-safe slug."""
+        s = s.lower().strip()
+        s = re.sub(r"[^a-z0-9]+", "_", s)
+        return s.strip("_")[:max_len]
+
+    doc_date = fields.get("date") or today
+    # Validate date format — fall back to today if invalid
+    if not re.match(r"\d{4}-\d{2}-\d{2}$", str(doc_date)):
+        doc_date = today
+
+    category = _slug(fields.get("category", "other") or "other")
+    issuer = _slug(fields.get("issuer", "") or "")
+    subject = _slug(fields.get("subject", "") or "")
+    ref = _slug(fields.get("ref_number", "") or "")
+
+    parts = [doc_date, category]
+    if issuer:
+        parts.append(issuer)
+    if subject:
+        parts.append(subject)
+    if ref:
+        parts.append(ref)
+
+    # Fallback: if only date + category, add "document"
+    if len(parts) <= 2:
+        parts.append("document")
+
+    return "_".join(parts) + ".pdf"
+
+
 
 @dataclass
 class DocumentInfo:
@@ -400,12 +445,20 @@ def analyze_document(
             f"Failed to parse Claude response as JSON: {e}\nResponse: {response_text}"
         ) from e
 
+    # Merge top-level extraction fields (issuer, subject, ref_number)
+    # into key_fields so they're preserved alongside other extracted data
+    key_fields = data.get("key_fields", {})
+    for extract_key in ("issuer", "subject", "ref_number"):
+        val = data.get(extract_key)
+        if val and extract_key not in key_fields:
+            key_fields[extract_key] = val
+
     doc_info = DocumentInfo(
         category=data.get("category", "other"),
-        filename=data.get("filename", f"{date.today().isoformat()}_other_document.pdf"),
+        filename=build_filename(data, date.today().isoformat()),
         summary=data.get("summary", ""),
         date=data.get("date"),
-        key_fields=data.get("key_fields", {}),
+        key_fields=key_fields,
         suggested_categories=data.get("suggested_categories", []),
         tags=data.get("tags", []),
         risk_level=data.get("risk_level", "none"),
@@ -586,18 +639,27 @@ def analyze_batch(
 
 def _parse_batch_results(data: list[dict]) -> list[tuple[list[int], DocumentInfo]]:
     """Parse batch analysis JSON into (pages, DocumentInfo) tuples."""
+    today = date.today().isoformat()
     results = []
     for doc in data:
         pages = [p - 1 for p in doc.get("pages", [])]
         page_conf_raw = doc.get("page_confidence", {})
         page_confidence = {int(k): int(v) for k, v in page_conf_raw.items()}
         confidence = int(doc.get("confidence", 100))
+
+        # Merge top-level extraction fields into key_fields
+        key_fields = doc.get("key_fields", {})
+        for extract_key in ("issuer", "subject", "ref_number"):
+            val = doc.get(extract_key)
+            if val and extract_key not in key_fields:
+                key_fields[extract_key] = val
+
         doc_info = DocumentInfo(
             category=doc.get("category", "other"),
-            filename=doc.get("filename", f"{date.today().isoformat()}_document.pdf"),
+            filename=build_filename(doc, today),
             summary=doc.get("summary", ""),
             date=doc.get("date"),
-            key_fields=doc.get("key_fields", {}),
+            key_fields=key_fields,
             suggested_categories=doc.get("suggested_categories", []),
             tags=doc.get("tags", []),
             risk_level=doc.get("risk_level", "none"),

@@ -9,6 +9,12 @@ Placeholders filled at runtime:
     {categories}   — comma-separated category list
     {num_pages}    — number of scanned pages (batch/verify)
     {num_uncertain}, {uncertain_list}, {initial_grouping} — verify only
+
+Pipeline:
+    1. ANALYSIS_PROMPT        — single document (1–20 pages) → classify + extract
+    2. BATCH_ANALYSIS_PROMPT  — mixed stack → group pages + classify each group
+    3. VERIFY_PROMPT          — second pass on uncertain groupings (Opus + extended thinking)
+    4. RISK_PROMPT            — optional separate pass for risk/scam analysis (future)
 """
 
 # ── Document categories ───────────────────────────────────────────
@@ -27,28 +33,97 @@ ALL_CATEGORIES = [
 
 # ── Single-document classification ────────────────────────────────
 # Used by analyze_document() for one document (1–20 pages).
+# The model returns structured fields; the engine builds the filename
+# deterministically via build_filename() — no model-generated filenames.
 
 ANALYSIS_PROMPT = """\
-You are a document classification expert. Analyze this scanned document carefully.
+You are a document classification expert. Analyze this scanned document.
 
-Read the ENTIRE document — headers, footers, letterheads, logos, stamps, handwriting, tables, fine print. Identify:
-- What TYPE of document this is (invoice, contract, insurance policy, medical record, bank statement, tax form, certificate, permit, letter, receipt, etc.)
-- WHO issued it (company, organization, government body, individual)
-- WHO is it addressed to or about
-- WHAT is the subject (product, service, transaction, claim, application, etc.)
-- KEY identifiers: reference numbers, policy numbers, invoice numbers, dates, amounts
+Read the ENTIRE document — headers, footers, letterheads, logos, stamps, \
+handwriting, tables, fine print.
+
+Identify and extract:
+  - Document TYPE (invoice, contract, insurance policy, medical record, etc.)
+  - ISSUER: the company, organization, or person who created/sent this
+  - RECIPIENT: who it is addressed to or about
+  - SUBJECT: what is this about (product, service, transaction, claim, etc.)
+  - KEY IDENTIFIERS: reference numbers, policy numbers, invoice numbers, \
+dates, amounts
 
 Return ONLY valid JSON (no markdown):
 
-"category": pick the best match from [{categories}]. If none fits well, use "other" and let the filename be descriptive.
-"filename": YYYY-MM-DD_category_who_what_details.pdf — be as specific as possible. Include entity names, product/model names, amounts, ref numbers. Examples: "2022-06-10_contract_bmw_x3_g01_sale.pdf", "2024-03-15_invoice_vodafone_march_89eur.pdf", "2025-01-20_insurance_axa_home_policy_renewal.pdf", "2024-11-05_medical_dr_mueller_blood_test_results.pdf". Use the document date if visible, otherwise {today}. Lowercase, underscores, no special characters.
-"summary": one clear sentence describing the document
-"date": YYYY-MM-DD or null
-"key_fields": relevant extracted key-value pairs (vendor, amount, parties, ref numbers, policy numbers, account numbers, etc.)
-"suggested_categories": 3-5 best matching categories from the list above, ordered by relevance
-"tags": 5-15 lowercase keywords from the actual content — document type, company names, people names, product/model names, topics, amounts, locations. Be specific, not generic.
-"risk_level": "none"|"low"|"medium"|"high"
-"risks": [] if clean, else short strings flagging: scams, misleading terms, hidden fees, unfair clauses, inconsistencies, phishing signals, unusual urgency"""
+{{
+  "category": "<best match from [{categories}]>",
+  "issuer": "<company or person who issued this>",
+  "subject": "<brief subject: product, service, transaction>",
+  "ref_number": "<primary reference/invoice/policy number or null>",
+  "summary": "<one clear sentence describing the document>",
+  "date": "<YYYY-MM-DD from the document, or null if not visible>",
+  "key_fields": {{
+    "amount": "<total amount with currency if present, else null>",
+    "recipient": "<addressed to whom>",
+    "<other relevant key>": "<value>"
+  }},
+  "suggested_categories": ["<2nd best>", "<3rd best>", "<4th best>"],
+  "tags": ["<5-15 lowercase keywords from actual content>"],
+  "risk_level": "none"|"low"|"medium"|"high",
+  "risks": []
+}}
+
+FIELD RULES:
+- "category": pick from [{categories}]. Use "other" only if nothing fits.
+- "issuer": the entity name as printed. Normalize to a clean short form \
+(e.g. "Vodafone" not "Vodafone GmbH Kundenservice").
+- "subject": be specific — "march_mobile_bill" not just "bill".
+- "ref_number": the most prominent identifier on the document. null if none.
+- "date": the document's own date, NOT today ({today}). null if not found.
+- "suggested_categories": 3-5 best matching categories ordered by relevance.
+- "tags": 5-15 lowercase keywords drawn from ACTUAL content: issuer name, \
+document type, product/model names, people names, topics, locations. \
+Exclude generic words like "document" or "paper".
+- "risk_level": "high" for scams/phishing, "medium" for hidden fees or \
+unfair terms, "low" for minor issues, "none" if clean.
+- "risks": [] if clean, else short strings: scams, misleading terms, \
+hidden fees, unfair clauses, inconsistencies, phishing signals.
+
+EXAMPLE — a Vodafone mobile invoice:
+{{
+  "category": "invoice",
+  "issuer": "vodafone",
+  "subject": "mobile_bill_march",
+  "ref_number": "INV-2024-88431",
+  "summary": "Vodafone monthly mobile invoice for March 2024, CHF 89.00",
+  "date": "2024-03-15",
+  "key_fields": {{
+    "amount": "CHF 89.00",
+    "recipient": "Nate Barbey",
+    "account_number": "VF-CH-4821"
+  }},
+  "suggested_categories": ["utilities", "subscription", "receipt"],
+  "tags": ["vodafone", "invoice", "mobile", "march", "chf_89", "telecom"],
+  "risk_level": "none",
+  "risks": []
+}}
+
+EXAMPLE — a BMW sales contract:
+{{
+  "category": "contract",
+  "issuer": "bmw_morges",
+  "subject": "x3_30e_purchase",
+  "ref_number": "KV-2025-1192",
+  "summary": "Purchase contract for BMW X3 30e xDrive from BMW Morges",
+  "date": "2025-02-20",
+  "key_fields": {{
+    "amount": "CHF 72,400.00",
+    "recipient": "Nate Barbey",
+    "vin": "WBA123456789",
+    "model": "BMW X3 30e xDrive"
+  }},
+  "suggested_categories": ["automobile", "legal", "receipt"],
+  "tags": ["bmw", "contract", "x3_30e", "purchase", "morges", "automobile"],
+  "risk_level": "none",
+  "risks": []
+}}"""
 
 
 # ── Batch sorting & classification ────────────────────────────────
@@ -94,11 +169,18 @@ WHEN IN DOUBT → SPLIT. It is much better to over-split (create too many small 
 The CONTENT and DOCUMENT TYPE visible on the page is the strongest grouping signal. Trust what you see on each page, not assumptions about what "should" be together.
 
 ═══ STEP 3: CLASSIFY AND OUTPUT ═══
-For each document group, determine the best category, generate a descriptive filename, and extract key information.
+For each document group, determine the best category, extract structured fields, and provide key information.
 
 Return ONLY valid JSON (no markdown) — an array of document groups:
 
-[{{"pages": [1, 2], "page_confidence": {{"1": 95, "2": 80}}, "confidence": 87, "category": "...", "filename": "YYYY-MM-DD_category_who_what.pdf", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
+[{{"pages": [1, 2], "page_confidence": {{"1": 95, "2": 80}}, "confidence": 87, "category": "...", "issuer": "...", "subject": "...", "ref_number": "...", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
+
+FIELD RULES:
+  - "issuer": the entity name as printed, normalized to a clean short form \
+(e.g. "Vodafone" not "Vodafone GmbH Kundenservice"). This is used to build the filename.
+  - "subject": brief specific subject — "march_mobile_bill" not just "bill". \
+This is used to build the filename.
+  - "ref_number": the most prominent reference/invoice/policy number, or null.
 
 CONFIDENCE SCORING (0–100):
   - "page_confidence": for EACH page, how certain you are it belongs to THIS document group
@@ -108,14 +190,8 @@ CONFIDENCE SCORING (0–100):
   - 50–69: Uncertain — could plausibly belong to another group
   - Below 50: Weak — little evidence for this grouping
 
-FILENAME RULES:
-  - Format: YYYY-MM-DD_category_who_what_details.pdf
-  - Be specific: include entity names, product names, amounts, reference numbers
-  - Examples: "2025-03-15_invoice_vodafone_march_89eur.pdf", "2024-06-10_contract_bmw_x3_sale.pdf", "2025-01-20_insurance_axa_home_policy_H847291.pdf", "2024-11-05_medical_dr_chen_referral_cardiology.pdf"
-  - Lowercase, underscores, no special characters
-
 Categories: {categories}
-If none of these categories fits well, use "other" and make the filename descriptive.
+If none of these categories fits well, use "other" and make the subject descriptive.
 
 Pages numbered 1–{num_pages}. Every page must appear in exactly one group. Use the document date if visible, otherwise {today}. Tags: 5-15 lowercase keywords from actual content (entity names, product names, topics, amounts, locations — be specific, not generic)."""
 
@@ -163,6 +239,49 @@ Return ONLY a valid JSON array of reassignments (empty [] if all assignments are
 Only include pages that need to be MOVED. Omit pages whose assignment is correct."""
 
 
+# ── Risk analysis (optional separate pass) ────────────────────────
+# Run AFTER classification, only when the user opts in or the
+# category warrants it (contracts, invoices, insurance, legal).
+# Keeping this separate avoids inflating token cost on every document.
+
+RISK_PROMPT = """\
+You are a consumer protection analyst. Review this document for anything \
+the recipient should be aware of.
+
+Document type: {category}
+Summary: {summary}
+
+Analyze for:
+  - SCAM SIGNALS: phishing language, fake urgency, suspicious sender, \
+mismatched branding, requests for unusual payment methods
+  - HIDDEN COSTS: fees buried in fine print, auto-renewal traps, \
+escalation clauses, penalty fees
+  - UNFAIR TERMS: one-sided cancellation, liability waivers, \
+unreasonable notice periods, binding arbitration
+  - INCONSISTENCIES: amounts that don't add up, dates that conflict, \
+terms that contradict each other
+  - MISSING ELEMENTS: unsigned where signature expected, missing dates, \
+incomplete fields
+
+Return ONLY valid JSON (no markdown):
+
+{{
+  "risk_level": "none"|"low"|"medium"|"high",
+  "findings": [
+    {{
+      "type": "hidden_fee"|"scam_signal"|"unfair_term"|"inconsistency"|"missing_element",
+      "severity": "info"|"warning"|"critical",
+      "description": "<what you found>",
+      "location": "<where in the document>"
+    }}
+  ],
+  "recommendation": "<one sentence: what should the recipient do?>"
+}}
+
+If the document is clean, return:
+{{"risk_level": "none", "findings": [], "recommendation": "No issues found."}}"""
+
+
 # ── System messages ───────────────────────────────────────────────
 # Short system prompts that set the model's output format.
 
@@ -183,4 +302,10 @@ SYSTEM_VERIFY = (
     "You are a document verification expert. Think carefully through "
     "each uncertain page, comparing it against all other pages. "
     "After thinking, output ONLY a valid JSON array — no explanations."
+)
+
+SYSTEM_RISK = (
+    "You are a consumer protection analyst. "
+    "Output ONLY a valid JSON object. "
+    "No explanations, no markdown fences, no preamble."
 )

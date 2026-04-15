@@ -11,6 +11,7 @@ from PIL import Image
 
 from auto_scan.recognition.engine import (
     DocumentInfo,
+    build_filename,
     _open_image,
     _resize_for_api,
     _label_page,
@@ -237,6 +238,79 @@ class TestRepairTruncatedJson:
         assert _repair_truncated_json(garbage) == garbage
 
 
+# ── build_filename ────────────────────────────────────────────────
+
+class TestBuildFilename:
+    """Test deterministic filename construction from structured fields."""
+
+    def test_all_fields(self):
+        fn = build_filename({
+            "date": "2024-03-15", "category": "invoice",
+            "issuer": "Vodafone", "subject": "mobile_bill_march",
+            "ref_number": "INV-2024-88431",
+        }, "2025-01-01")
+        assert fn == "2024-03-15_invoice_vodafone_mobile_bill_march_inv_2024_88431.pdf"
+
+    def test_without_ref(self):
+        fn = build_filename({
+            "date": "2025-02-20", "category": "contract",
+            "issuer": "BMW Morges", "subject": "x3_30e_purchase",
+        }, "2025-01-01")
+        assert fn == "2025-02-20_contract_bmw_morges_x3_30e_purchase.pdf"
+
+    def test_missing_date_uses_today(self):
+        fn = build_filename({
+            "category": "letter", "issuer": "axa",
+            "subject": "policy_renewal",
+        }, "2025-04-15")
+        assert fn.startswith("2025-04-15_letter_axa_policy_renewal.pdf")
+
+    def test_null_date_uses_today(self):
+        fn = build_filename({"category": "receipt", "date": None,
+                             "issuer": "migros"}, "2025-01-01")
+        assert fn.startswith("2025-01-01_receipt_migros")
+
+    def test_invalid_date_uses_today(self):
+        fn = build_filename({"category": "tax", "date": "not-a-date",
+                             "issuer": "fisc"}, "2025-01-01")
+        assert fn.startswith("2025-01-01_tax_fisc")
+
+    def test_empty_fields_fallback(self):
+        fn = build_filename({}, "2025-01-01")
+        assert fn == "2025-01-01_other_document.pdf"
+
+    def test_special_characters_slugified(self):
+        fn = build_filename({
+            "category": "invoice", "issuer": "Müller & Söhne GmbH",
+            "subject": "Réparation #42",
+        }, "2025-01-01")
+        # Non-ASCII and special chars become underscores
+        assert ".pdf" in fn
+        assert " " not in fn
+        assert "&" not in fn
+
+    def test_none_values_handled(self):
+        fn = build_filename({
+            "category": "other", "issuer": None,
+            "subject": None, "ref_number": None,
+        }, "2025-01-01")
+        assert fn == "2025-01-01_other_document.pdf"
+
+    def test_long_fields_truncated(self):
+        fn = build_filename({
+            "category": "letter",
+            "issuer": "a" * 100,
+            "subject": "b" * 100,
+        }, "2025-01-01")
+        # Each slug capped at 40 chars
+        parts = fn.removesuffix(".pdf").split("_", 2)  # date_category_rest
+        assert len(parts) >= 3
+
+    def test_null_category_defaults_to_other(self):
+        fn = build_filename({"category": None, "issuer": "test"}, "2025-01-01")
+        assert "_other_" in fn
+
+
 # ── Batch result parsing ──────────────────────────────────────────
 
 class TestParseBatchResults:
@@ -248,7 +322,8 @@ class TestParseBatchResults:
             "page_confidence": {"1": 95, "2": 88},
             "confidence": 91,
             "category": "invoice",
-            "filename": "2024-03-15_invoice.pdf",
+            "issuer": "vodafone",
+            "subject": "march_bill",
             "summary": "Test invoice",
             "date": "2024-03-15",
             "tags": ["invoice", "test"],
@@ -261,13 +336,15 @@ class TestParseBatchResults:
         assert doc_info.category == "invoice"
         assert doc_info.confidence == 91
         assert doc_info.page_confidence == {1: 95, 2: 88}
+        # Filename built deterministically from structured fields
+        assert doc_info.filename == "2024-03-15_invoice_vodafone_march_bill.pdf"
 
     def test_multiple_documents(self):
         data = [
             {"pages": [1], "confidence": 95, "category": "invoice",
-             "filename": "a.pdf", "summary": "A", "date": None},
+             "issuer": "a", "summary": "A", "date": None},
             {"pages": [2, 3], "confidence": 80, "category": "contract",
-             "filename": "b.pdf", "summary": "B", "date": None},
+             "issuer": "b", "summary": "B", "date": None},
         ]
         results = _parse_batch_results(data)
         assert len(results) == 2
@@ -282,6 +359,23 @@ class TestParseBatchResults:
         assert doc_info.confidence == 100
         assert doc_info.tags == []
         assert doc_info.risks == []
+        # Fallback filename when no structured fields
+        assert "other_document.pdf" in doc_info.filename
+
+    def test_structured_fields_in_key_fields(self):
+        """issuer/subject/ref_number merge into key_fields."""
+        data = [{
+            "pages": [1], "category": "invoice",
+            "issuer": "swisscom", "subject": "fiber_bill",
+            "ref_number": "SC-9921",
+            "key_fields": {"amount": "CHF 59.00"},
+        }]
+        results = _parse_batch_results(data)
+        kf = results[0][1].key_fields
+        assert kf["issuer"] == "swisscom"
+        assert kf["subject"] == "fiber_bill"
+        assert kf["ref_number"] == "SC-9921"
+        assert kf["amount"] == "CHF 59.00"  # existing key_fields preserved
 
 
 # ── DocumentInfo dataclass ────────────────────────────────────────
