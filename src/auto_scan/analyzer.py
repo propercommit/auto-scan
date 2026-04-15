@@ -653,7 +653,7 @@ def analyze_batch(
         print(f"  Doc: {doc_info.filename} (pages {page_nums}, confidence {doc_info.confidence}%)", file=sys.stderr)
 
     # ── Verification pass for low-confidence pages ──────────────────
-    CONFIDENCE_THRESHOLD = 75
+    CONFIDENCE_THRESHOLD = 90
     uncertain_pages = []
     for pages, doc_info in results:
         for p in pages:
@@ -699,23 +699,42 @@ def _parse_batch_results(data: list[dict]) -> list[tuple[list[int], DocumentInfo
 
 
 VERIFY_PROMPT = """\
-You are verifying uncertain page assignments in a document sorting task.
+You are a document verification expert performing a THOROUGH second-pass review.
 
-The first model sorted {num_pages} scanned pages into document groups, but was uncertain about {num_uncertain} page(s): {uncertain_list}.
+A first-pass model sorted {num_pages} scanned pages into document groups but was uncertain about {num_uncertain} page(s): {uncertain_list}.
 
-Its initial grouping was:
+INITIAL GROUPING:
 {initial_grouping}
 
-For EACH uncertain page, look at the image carefully and decide:
-  - Does it belong to the document group it was assigned to?
-  - Or should it be moved to a different group?
-  - Or should it be its own separate document?
+You are seeing ALL {num_pages} pages so you can compare every detail. For each UNCERTAIN page listed above, perform a deep analysis:
 
-Return ONLY valid JSON — an array of reassignments (empty array if all assignments are correct):
-[{{"page": 3, "move_to_doc": 1, "reason": "short explanation"}}]
+═══ STEP 1: READ EVERY DETAIL ON THE UNCERTAIN PAGE ═══
+  - Full header/letterhead text, logo, and colors
+  - All reference numbers (invoice #, policy #, contract #, account #, claim #)
+  - Sender and recipient names, addresses
+  - Page numbering ("Page 2 of 4", "2/4", sequential footers)
+  - Document type and subject matter
+  - Language, formatting, paper style, stamps, signatures
+  - Dates, amounts, key identifiers
+
+═══ STEP 2: COMPARE WITH EVERY OTHER PAGE ═══
+For each uncertain page, compare it against ALL other pages in the batch:
+  - Does the header/letterhead EXACTLY match any other page?
+  - Do reference numbers match? (Same policy # = same document)
+  - Is the content a continuation? (Page 2 picks up where page 1 left off)
+  - Is the page numbering compatible? (Two "page 1" pages = different documents)
+  - Same sender AND same recipient AND same document type?
+
+═══ STEP 3: DECIDE ═══
+  - KEEP in current group: strong evidence it belongs (matching ref #, continuous content)
+  - MOVE to another group: clearly matches a different document (same header/ref #)
+  - NEW document: doesn't belong to any existing group
+
+Return ONLY a valid JSON array of reassignments (empty [] if all assignments are correct):
+[{{"page": 3, "move_to_doc": 1, "reason": "matching policy number AX-4821 and identical AXA letterhead"}}]
 
 "move_to_doc" is the 1-based document number from the initial grouping, or "new" to create a separate document.
-If a page's assignment is correct, do NOT include it in the array."""
+Only include pages that need to be MOVED. Omit pages whose assignment is correct."""
 
 
 def _verify_uncertain_pages(
@@ -728,7 +747,12 @@ def _verify_uncertain_pages(
     redact: bool = False,
     redact_patterns: set[str] | None = None,
 ) -> list[tuple[list[int], DocumentInfo]]:
-    """Re-analyze uncertain pages with a verification model."""
+    """Re-analyze uncertain pages with a stronger model using extended thinking.
+
+    Sends ALL page images (not just uncertain ones) so the verification model
+    can compare headers, reference numbers, and content across the full batch.
+    Uses extended thinking for deeper reasoning about page assignments.
+    """
 
     # Build a summary of the initial grouping for context
     grouping_lines = []
@@ -740,17 +764,17 @@ def _verify_uncertain_pages(
         )
 
     verify_text = VERIFY_PROMPT.format(
-        num_pages=sum(len(pages) for pages, _ in results),
+        num_pages=len(images),
         num_uncertain=len(uncertain_pages),
         uncertain_list=", ".join(str(p) for p in uncertain_pages),
         initial_grouping="\n".join(grouping_lines),
     )
 
-    # Send only the uncertain page images + context (redacted if enabled)
+    # Send ALL page images so the model can compare across the full batch
     verify_content: list[dict] = []
-    for p in uncertain_pages:
-        safe_img = _maybe_redact(images[p - 1], redact, redact_patterns)
-        labeled = _label_page(safe_img, p, max_dim=1568)
+    for i, img_data in enumerate(images):
+        safe_img = _maybe_redact(img_data, redact, redact_patterns)
+        labeled = _label_page(safe_img, i + 1, max_dim=1568)
         b64 = base64.standard_b64encode(labeled).decode("ascii")
         verify_content.append({
             "type": "image",
@@ -758,42 +782,77 @@ def _verify_uncertain_pages(
         })
     verify_content.append({"type": "text", "text": verify_text})
 
-    # Use Opus for verification — more capable model for uncertain pages
+    # Use Opus with extended thinking for deeper analysis
     verify_model = "claude-opus-4-20250514"
+    thinking_budget = 10_000
 
     try:
         check_rate_limit()
         message = client.messages.create(
             model=verify_model,
-            max_tokens=2048,
-            system="You are a document verification API. Output ONLY valid JSON arrays. No explanations.",
-            messages=[
-                {"role": "user", "content": verify_content},
-                {"role": "assistant", "content": "["},
-            ],
+            max_tokens=16_000,
+            thinking={
+                "type": "enabled",
+                "budget_tokens": thinking_budget,
+            },
+            temperature=1,  # required for extended thinking
+            system=(
+                "You are a document verification expert. Think carefully through "
+                "each uncertain page, comparing it against all other pages. "
+                "After thinking, output ONLY a valid JSON array — no explanations."
+            ),
+            messages=[{"role": "user", "content": verify_content}],
         )
     except Exception as e:
         print(f"  Verification failed ({e}), keeping original assignments", file=sys.stderr)
         return results
 
-    record_usage(message.usage.input_tokens, message.usage.output_tokens)
+    # Log token usage (extended thinking reports input + output separately)
+    usage = message.usage
+    in_tok = usage.input_tokens
+    out_tok = usage.output_tokens
+    # Cache tokens may be available
+    cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    record_usage(in_tok, out_tok)
+    extra = ""
+    if cache_create or cache_read:
+        extra = f" (cache: +{cache_create:,} create, {cache_read:,} read)"
     print(
-        f"  Verify tokens: {message.usage.input_tokens:,} in + {message.usage.output_tokens:,} out",
+        f"  Verify tokens: {in_tok:,} in + {out_tok:,} out{extra}",
         file=sys.stderr,
     )
 
-    response_text = "[" + "".join(
-        block.text for block in message.content if hasattr(block, "text")
-    ).strip()
+    # Extract text from response — skip thinking blocks, only use text blocks
+    response_text = ""
+    for block in message.content:
+        if getattr(block, "type", None) == "text" and hasattr(block, "text"):
+            response_text += block.text
+
+    response_text = response_text.strip()
+
+    # Strip markdown code fences if present
+    if response_text.startswith("```"):
+        lines = response_text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        response_text = "\n".join(lines).strip()
+
+    if not response_text:
+        print("  Verification returned empty response, keeping original", file=sys.stderr)
+        return results
 
     try:
         reassignments = json.loads(response_text)
     except json.JSONDecodeError:
-        print("  Verification response not parseable, keeping original", file=sys.stderr)
+        print(f"  Verification response not parseable, keeping original", file=sys.stderr)
+        print(f"    Response preview: {response_text[:200]}", file=sys.stderr)
         return results
 
     if not isinstance(reassignments, list) or not reassignments:
-        print("  Verification confirmed all assignments", file=sys.stderr)
+        print("  Verification confirmed all assignments ✓", file=sys.stderr)
         return results
 
     # Apply reassignments
