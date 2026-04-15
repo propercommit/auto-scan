@@ -110,6 +110,22 @@ def _get_config(**overrides) -> Config:
     return load_config(**overrides)
 
 
+def _usage_delta(before: dict, after: dict) -> dict:
+    """Calculate token usage and cost between two get_usage() snapshots."""
+    from auto_scan.usage import COST_PER_INPUT_TOKEN, COST_PER_OUTPUT_TOKEN
+    inp = after.get("input_tokens", 0) - before.get("input_tokens", 0)
+    out = after.get("output_tokens", 0) - before.get("output_tokens", 0)
+    calls = after.get("api_calls", 0) - before.get("api_calls", 0)
+    cost = inp * COST_PER_INPUT_TOKEN + out * COST_PER_OUTPUT_TOKEN
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "total_tokens": inp + out,
+        "api_calls": calls,
+        "estimated_cost": round(cost, 4),
+    }
+
+
 # Image utilities are now in auto_scan.image_utils.
 # Local aliases for convenience (used throughout this file).
 _open_image = open_image
@@ -845,7 +861,10 @@ def _run_scan_job(data: dict, mode: str, resume_from: str | None = None):
             with _state_lock:
                 state["job"]["status"] = "analyzing"
             _log(f"Batch analyzing {len(images)} pages...")
+            usage_before = get_usage()
             batch_results = analyze_batch(images, config, redact=redact, redact_patterns=redact_pats)
+            usage_after = get_usage()
+            batch_usage = _usage_delta(usage_before, usage_after)
             _log(f"Detected {len(batch_results)} document(s)")
             if _is_cancelled():
                 with _state_lock:
@@ -878,14 +897,17 @@ def _run_scan_job(data: dict, mode: str, resume_from: str | None = None):
             with _state_lock:
                 state["job"] = {
                     "status": "done",
-                    "result": {"ok": True, "batch": True, "documents": saved, "page_redactions": page_redactions},
+                    "result": {"ok": True, "batch": True, "documents": saved, "page_redactions": page_redactions, "usage": batch_usage},
                 }
 
         elif mode == "batch-assisted":
             with _state_lock:
                 state["job"]["status"] = "analyzing"
             _log(f"Batch analyzing {len(images)} pages...")
+            usage_before = get_usage()
             batch_results = analyze_batch(images, config, redact=redact, redact_patterns=redact_pats)
+            usage_after = get_usage()
+            batch_usage = _usage_delta(usage_before, usage_after)
             _log(f"Detected {len(batch_results)} document(s)")
             if _is_cancelled():
                 with _state_lock:
@@ -925,6 +947,7 @@ def _run_scan_job(data: dict, mode: str, resume_from: str | None = None):
                         "all_previews": all_previews,
                         "documents": docs,
                         "page_redactions": page_redactions,
+                        "usage": batch_usage,
                     },
                 }
 
@@ -1567,6 +1590,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .risk-alert ul { margin: 4px 0 0 16px; padding: 0; }
   .risk-alert li { margin-bottom: 2px; }
   .batch-modal { width: 900px; max-height: 90vh; overflow-y: auto; }
+  .batch-usage { display: flex; align-items: center; gap: 16px; padding: 10px 14px; margin-bottom: 12px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; color: var(--gray); }
+  .batch-usage .bu-item { display: flex; align-items: center; gap: 4px; }
+  .batch-usage .bu-value { font-weight: 700; color: var(--text); }
+  .batch-usage .bu-sep { color: var(--border); }
   .batch-docs { display: flex; flex-direction: column; gap: 14px; max-height: 55vh; overflow-y: auto; padding: 4px; }
   .batch-doc { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; background: var(--bg); }
   .batch-doc-head { margin-bottom: 10px; }
@@ -1972,6 +1999,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   <div class="card" id="batch-results-card" style="display:none" aria-live="polite">
     <h2 id="batch-results-title">Batch Complete</h2>
+    <div class="batch-usage" id="batch-results-usage" style="display:none"></div>
     <ul class="batch-results" id="batch-results-list"></ul>
     <button class="btn btn-primary btn-scan-next" onclick="scanNext()">Scan Next Documents</button>
   </div>
@@ -2040,6 +2068,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="modal-overlay" id="batch-modal" role="dialog" aria-modal="true" aria-labelledby="batch-title">
   <div class="modal batch-modal">
     <h2 id="batch-title">Batch Scan &mdash; <span id="batch-count">0</span> Documents Detected</h2>
+    <div class="batch-usage" id="batch-usage" style="display:none"></div>
     <div class="batch-docs" id="batch-docs"></div>
     <div class="modal-btns" style="margin-top:16px">
       <button class="btn btn-secondary" onclick="cancelBatch()">Cancel</button>
@@ -3024,6 +3053,7 @@ function showBatchResults(docs) {
   const card = $('#batch-results-card');
   card.style.display = '';
   $('#batch-results-title').textContent = 'Batch Complete \u2014 ' + docs.length + ' Document' + (docs.length !== 1 ? 's' : '');
+  renderUsageBar($('#batch-results-usage'), _batchUsage);
   const list = $('#batch-results-list');
   list.innerHTML = '';
   docs.forEach(doc => {
@@ -3053,6 +3083,21 @@ function showBatchResults(docs) {
   });
 }
 
+// Store batch usage for display after save
+let _batchUsage = null;
+
+function renderUsageBar(el, usage) {
+  if (!usage || !el) return;
+  const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+  const cost = typeof usage.estimated_cost === 'number' ? '$' + usage.estimated_cost.toFixed(4) : '';
+  el.innerHTML =
+    '<span class="bu-item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> <span class="bu-value">' + (usage.api_calls || 0) + '</span> API call' + ((usage.api_calls||0) !== 1 ? 's' : '') + '</span>' +
+    '<span class="bu-sep">\u00b7</span>' +
+    '<span class="bu-item"><span class="bu-value">' + fmt(usage.total_tokens || 0) + '</span> tokens <span style="opacity:.6">(' + fmt(usage.input_tokens || 0) + ' in + ' + fmt(usage.output_tokens || 0) + ' out)</span></span>' +
+    (cost ? '<span class="bu-sep">\u00b7</span><span class="bu-item"><span class="bu-value">' + cost + '</span></span>' : '');
+  el.style.display = '';
+}
+
 function showBatchModal(result) {
   const docs = result.documents;
   allPreviews = result.all_previews || [];
@@ -3060,10 +3105,12 @@ function showBatchModal(result) {
   batchData = docs;
   batchTags = docs.map(d => new Set(d.tags || []));
   batchPages = docs.map(d => [...(d.pages || [])]);
+  _batchUsage = result.usage || null;
   // Clear the old DOM before rendering to prevent syncBatchEdits from
   // overwriting fresh data with stale input values from the previous scan.
   $('#batch-docs').innerHTML = '';
   renderBatchDocs(true);  // skipSync=true — data is fresh from the API
+  renderUsageBar($('#batch-usage'), _batchUsage);
   openModal('#batch-modal');
 }
 
@@ -3443,6 +3490,9 @@ function scanNext() {
   const riskEl = $('#r-risk'); if (riskEl) { riskEl.style.display = 'none'; riskEl.innerHTML = ''; }
   const pathEl = $('#r-path'); if (pathEl) { pathEl.style.display = 'none'; pathEl.innerHTML = ''; }
   $('#batch-results-list').innerHTML = '';
+  $('#batch-usage').style.display = 'none';
+  $('#batch-results-usage').style.display = 'none';
+  _batchUsage = null;
   // Clear stale data from previous scan
   classifyPageCount = 0;
   batchData = [];
