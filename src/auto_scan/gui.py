@@ -277,6 +277,113 @@ def api_test_ocr():
     return jsonify(result)
 
 
+@app.route("/api/install-tesseract", methods=["POST"])
+def api_install_tesseract():
+    """Install tesseract OCR using the system package manager."""
+    import shutil
+    import subprocess
+
+    # Already installed?
+    if shutil.which("tesseract"):
+        return jsonify({"ok": True, "message": "Tesseract is already installed."})
+
+    system = platform.system()
+
+    try:
+        if system == "Darwin":
+            # macOS — use Homebrew
+            if not shutil.which("brew"):
+                return jsonify({
+                    "ok": False,
+                    "message": (
+                        "Homebrew is not installed. "
+                        "Install it first from https://brew.sh then retry, "
+                        "or run: brew install tesseract"
+                    ),
+                })
+            _log("Installing tesseract via Homebrew...")
+            proc = subprocess.run(
+                ["brew", "install", "tesseract"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if proc.returncode != 0:
+                return jsonify({"ok": False, "message": f"brew install failed:\n{proc.stderr[-500:]}"})
+
+        elif system == "Windows":
+            # Windows — use winget (built into Win 10/11)
+            winget = shutil.which("winget")
+            if not winget:
+                return jsonify({
+                    "ok": False,
+                    "message": (
+                        "winget is not available. "
+                        "Download the Tesseract installer manually from:\n"
+                        "https://github.com/UB-Mannheim/tesseract/wiki"
+                    ),
+                })
+            _log("Installing tesseract via winget...")
+            proc = subprocess.run(
+                [
+                    "winget", "install",
+                    "--id", "UB-Mannheim.TesseractOCR",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ],
+                capture_output=True, text=True, timeout=300,
+            )
+            if proc.returncode != 0:
+                return jsonify({"ok": False, "message": f"winget install failed:\n{proc.stderr[-500:]}"})
+
+            # winget installs to Program Files — add to PATH for this session
+            tesseract_paths = [
+                r"C:\Program Files\Tesseract-OCR",
+                r"C:\Program Files (x86)\Tesseract-OCR",
+            ]
+            for p in tesseract_paths:
+                if os.path.isfile(os.path.join(p, "tesseract.exe")):
+                    os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+                    break
+
+        else:
+            # Linux — apt, dnf, or pacman
+            for cmd, args in [
+                ("apt-get", ["sudo", "apt-get", "install", "-y", "tesseract-ocr"]),
+                ("dnf", ["sudo", "dnf", "install", "-y", "tesseract"]),
+                ("pacman", ["sudo", "pacman", "-S", "--noconfirm", "tesseract"]),
+            ]:
+                if shutil.which(cmd):
+                    _log(f"Installing tesseract via {cmd}...")
+                    proc = subprocess.run(
+                        args, capture_output=True, text=True, timeout=300,
+                    )
+                    if proc.returncode == 0:
+                        break
+                    return jsonify({"ok": False, "message": f"{cmd} install failed:\n{proc.stderr[-500:]}"})
+            else:
+                return jsonify({
+                    "ok": False,
+                    "message": "Could not find apt, dnf, or pacman. Install tesseract-ocr manually.",
+                })
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "message": "Installation timed out after 5 minutes."})
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"Installation failed: {e}"})
+
+    # Verify it worked
+    if shutil.which("tesseract"):
+        _log("Tesseract installed successfully")
+        return jsonify({"ok": True, "message": "Tesseract installed successfully!"})
+    else:
+        return jsonify({
+            "ok": False,
+            "message": (
+                "Installation completed but tesseract is not in PATH. "
+                "You may need to restart the app."
+            ),
+        })
+
+
 @app.route("/api/save-key", methods=["POST"])
 def api_save_key():
     data = request.json or {}
@@ -1907,7 +2014,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <span>Redact sensitive data before sending to AI</span>
       </label>
       <div class="field-hint">Uses local OCR to detect and black out sensitive patterns in images before they reach the API. Requires <code>tesseract</code> and <code>pytesseract</code>.</div>
-      <div id="tesseract-hint" style="display:none;margin-top:6px;padding:8px 12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:6px;font-size:13px;color:#92400e"></div>
+      <div id="tesseract-hint" style="display:none;margin-top:6px;padding:10px 12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:6px;font-size:13px;color:#92400e">
+        <span id="tesseract-hint-text"></span>
+        <button id="btn-install-tesseract" class="btn btn-secondary" style="margin-left:8px;padding:4px 12px;font-size:12px;vertical-align:middle" onclick="installTesseract()">Install Tesseract</button>
+      </div>
       <div style="margin-top:8px"><button class="btn btn-secondary" id="btn-test-ocr" style="width:auto;padding:6px 14px;font-size:13px" onclick="testOCR()">Test OCR</button><span id="ocr-test-result" style="margin-left:10px;font-size:13px"></span></div>
       <div id="redact-patterns" style="display:none;margin-top:8px;padding-left:26px">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="ssn" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> SSN (US Social Security)</label>
@@ -2195,7 +2305,9 @@ let pendingRisk = {level: null, risks: []};
     const hintEl = $('#tesseract-hint');
     if (hintEl && !data.has_tesseract) {
       hintEl.style.display = '';
-      hintEl.innerHTML = '\u26a0\ufe0f <strong>Tesseract not found.</strong> ' + _esc(data.tesseract_hint);
+      $('#tesseract-hint-text').innerHTML = '\u26a0\ufe0f <strong>Tesseract not found.</strong> ';
+    } else if (hintEl) {
+      hintEl.style.display = 'none';
     }
   } catch(e) {}
   refreshLog();
@@ -2224,6 +2336,33 @@ $('#reckless-toggle').addEventListener('change', function() {
   updateRecklessState(this.checked);
   saveSettings();
 });
+
+async function installTesseract() {
+  const btn = $('#btn-install-tesseract');
+  const hintText = $('#tesseract-hint-text');
+  btn.disabled = true;
+  btn.textContent = 'Installing...';
+  hintText.innerHTML = '\u23f3 Installing Tesseract OCR \u2014 this may take a minute...';
+  try {
+    const res = await fetch('/api/install-tesseract', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      $('#tesseract-hint').style.background = '#dcfce7';
+      $('#tesseract-hint').style.borderColor = '#22c55e';
+      $('#tesseract-hint').style.color = '#166534';
+      hintText.innerHTML = '\u2705 ' + _esc(data.message);
+      btn.style.display = 'none';
+    } else {
+      hintText.innerHTML = '\u274c <strong>Install failed.</strong> ' + _esc(data.message);
+      btn.textContent = 'Retry';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    hintText.innerHTML = '\u274c <strong>Request failed:</strong> ' + _esc(e.message);
+    btn.textContent = 'Retry';
+    btn.disabled = false;
+  }
+}
 
 async function testOCR() {
   const btn = $('#btn-test-ocr');
