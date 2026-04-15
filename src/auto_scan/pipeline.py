@@ -78,7 +78,7 @@ def run_scan(
         return None
 
     # 4. Save
-    return save_document(images, doc_info, config)
+    return save_document(images, doc_info, config, tags=doc_info.tags)
 
 
 def show_status(config: Config) -> None:

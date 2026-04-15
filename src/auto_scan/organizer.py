@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import os
+import platform
+import plistlib
 import re
 import shutil
 import subprocess
@@ -68,6 +70,43 @@ def _embed_tags(pdf_bytes: bytes, tags: list[str], summary: str = "") -> bytes:
         return out.getvalue()
 
 
+def _set_finder_tags(path: Path, tags: list[str]) -> None:
+    """Write macOS Finder tags so files are searchable in Spotlight and Finder.
+
+    Sets the com.apple.metadata:_kMDItemUserTags extended attribute using
+    a binary plist, which is the format Finder/Spotlight expects.
+    """
+    if not tags or platform.system() != "Darwin":
+        return
+    try:
+        # Finder tags are stored as a plist array of strings with "\n0" color suffix (0 = no color)
+        plist_tags = [f"{t}\n0" for t in tags]
+        plist_bytes = plistlib.dumps(plist_tags, fmt=plistlib.FMT_BINARY)
+    except Exception:
+        return
+
+    # Try the xattr Python package first (faster, no subprocess)
+    try:
+        import xattr as _xattr_mod
+        _xattr_mod.setxattr(str(path), "com.apple.metadata:_kMDItemUserTags", plist_bytes)
+        return
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Fall back to the xattr CLI tool (ships with macOS)
+    try:
+        import binascii
+        hex_str = binascii.hexlify(plist_bytes).decode()
+        subprocess.run(
+            ["xattr", "-wx", "com.apple.metadata:_kMDItemUserTags", hex_str, str(path)],
+            check=True, timeout=10,
+        )
+    except Exception:
+        pass  # Non-critical — tags still exist in PDF metadata
+
+
 def save_document(
     images: list[bytes],
     doc_info: DocumentInfo,
@@ -103,6 +142,7 @@ def save_document(
     output_path.write_bytes(pdf_bytes)
     os.chmod(output_path, 0o600)  # owner-only: scanned docs may contain sensitive data
     _ocr_pdf(output_path)
+    _set_finder_tags(output_path, embed_tags)
 
     print(f"Saved: {output_path}", file=sys.stderr)
     if embed_tags:
