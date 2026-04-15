@@ -135,6 +135,11 @@ if [ -f "$PLIST" ]; then
     /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$PLIST" 2>/dev/null || true
 fi
 
+# ── Step 5b: Ad-hoc code sign ──────────────────────────────────
+echo "Step 5b: Ad-hoc code signing..."
+codesign --force --deep --sign - "$DIST_DIR/${APP_NAME}.app"
+codesign --verify "$DIST_DIR/${APP_NAME}.app" && echo "  Signature valid" || echo "  Warning: signature verification failed"
+
 # ── Step 6: Create .dmg ─────────────────────────────────────────
 echo "Step 6: Creating DMG..."
 DMG_PATH="$DIST_DIR/${DMG_NAME}-${VERSION}.dmg"
