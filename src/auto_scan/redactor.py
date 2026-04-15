@@ -36,10 +36,56 @@ PATTERNS: dict[str, re.Pattern] = {
     "dob": re.compile(r"\b\d{1,2}[./]\d{1,2}[./]\d{4}\b"),
     # Passport numbers (common formats)
     "passport": re.compile(r"\b[A-Z]\d{7,8}\b"),
+    # Postal/mailing addresses — street lines and distinctive postal code formats
+    "address": re.compile(
+        r"(?:"
+        # ── French streets: "12 rue de la Paix", "42 bis avenue des Champs-Élysées" ──
+        r"\b\d{1,5}\s*,?\s*(?:bis|ter)?\s*,?\s*"
+        r"(?:rue|avenue|av|boulevard|blvd|all[ée]e|all|chemin|ch|"
+        r"place|pl|impasse|imp|passage|pass|cours|quai|"
+        r"route|rte|voie|faubourg|fg|r[ée]sidence|r[ée]s|"
+        r"lotissement|hameau|lieu[- ]?dit)\b"
+        r"(?:\s+\S+){0,5}"
+        r"|"
+        # ── P.O. Box / Boîte Postale / Postfach ──
+        r"\b(?:b\.?p\.?|bo[îi]te\s+postale|p\.?o\.?\s*box|postfach|casier\s+postal)"
+        r"\s*\d+"
+        r"|"
+        # ── German streets: "Musterstraße 42", "Berliner Straße 42" ──
+        # Note: stra(?:ß|ss)e handles both "Straße" (ß=1 char) and "Strasse" (ss=2 chars)
+        r"\b(?:"
+        r"[A-Za-z\u00C0-\u024F]+(?:stra(?:ß|ss)e|str\.?|gasse|weg|platz|allee|ring|damm|ufer)"
+        r"|"
+        r"(?:[A-Za-z\u00C0-\u024F]+\s+){1,2}"
+        r"(?:Stra(?:ß|ss)e|Gasse|Weg|Platz|Allee|Ring|Damm|Ufer)"
+        r")\s+\d{1,5}[a-z]?\b"
+        r"|"
+        # ── English streets: "123 Main Street", "456 Oak Hill Road" ──
+        r"\b\d{1,5}\s+(?:[A-Za-z\u00C0-\u024F]+\.?\s+){1,3}"
+        r"(?:street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|"
+        r"lane|ln|court|ct|circle|cir|way|terrace|ter|"
+        r"parkway|pkwy|highway|hwy|square|sq)\b"
+        r"(?:[\s,]+(?:apt|suite|unit|ste|fl|floor|bldg|building)\.?\s*\w+)?"
+        r"|"
+        # ── Postal code + city (distinctive formats only) ──
+        # French CEDEX
+        r"\b\d{5}\s+\S+(?:\s+\S+)*\s+cedex(?:\s+\d+)?\b"
+        r"|"
+        # Swiss: CH-1234 City
+        r"\bCH[-\s]?\d{4}\s+\S{3,}"
+        r"|"
+        # UK postal codes: SW1A 1AA, EC2R 8AH, W1D 4FA
+        r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b"
+        r"|"
+        # US: City, ST 12345(-6789)
+        r"\b[A-Za-z]+(?:\s+[A-Za-z]+)*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?"
+        r")",
+        re.IGNORECASE,
+    ),
 }
 
 # Default: redact all patterns.
-DEFAULT_ENABLED = {"ssn", "ahv", "credit_card", "iban", "phone", "email", "dob", "passport"}
+DEFAULT_ENABLED = {"ssn", "ahv", "credit_card", "iban", "phone", "email", "dob", "passport", "address"}
 
 
 def _luhn_check(num_str: str) -> bool:
