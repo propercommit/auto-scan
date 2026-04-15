@@ -179,7 +179,7 @@ def api_test_ocr():
 
     # Verify OCR can read text from the first document
     try:
-        first_img = Image.open(io.BytesIO(test_docs[0][0]))
+        first_img = open_image(test_docs[0][0])
         ocr_text = pytesseract.image_to_string(first_img)
         if len(ocr_text.strip()) < 5:
             result["details"] = "OCR returned no text. Tesseract may not be configured correctly."
