@@ -1,0 +1,243 @@
+name: Build & Release
+
+# Trigger on version tags: v0.1.0, v1.2.3, etc.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # needed to create GitHub Releases
+
+jobs:
+  # ── macOS .dmg ─────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+          pip install "pyinstaller>=6,<7"
+
+      - name: Generate icons
+        run: python packaging/icon_gen.py
+
+      - name: Build .app with PyInstaller
+        run: |
+          pyinstaller \
+            --name "Auto Scan" \
+            --windowed \
+            --icon packaging/icon.icns \
+            --noconfirm \
+            --clean \
+            \
+            --hidden-import auto_scan \
+            --hidden-import auto_scan.gui \
+            --hidden-import auto_scan.cli \
+            --hidden-import auto_scan.config \
+            --hidden-import auto_scan.pipeline \
+            --hidden-import auto_scan.organizer \
+            --hidden-import auto_scan.recognition \
+            --hidden-import auto_scan.recognition.engine \
+            --hidden-import auto_scan.recognition.prompts \
+            --hidden-import auto_scan.scanner \
+            --hidden-import auto_scan.scanner.discovery \
+            --hidden-import auto_scan.scanner.escl \
+            --hidden-import auto_scan.redactor \
+            --hidden-import auto_scan.dedup \
+            --hidden-import auto_scan.history \
+            --hidden-import auto_scan.image_utils \
+            --hidden-import auto_scan.settings \
+            --hidden-import auto_scan.usage \
+            --hidden-import auto_scan.analyzer \
+            \
+            --hidden-import flask \
+            --hidden-import flask.json \
+            --hidden-import jinja2 \
+            --hidden-import markupsafe \
+            --hidden-import werkzeug \
+            --hidden-import anthropic \
+            --hidden-import httpx \
+            --hidden-import httpcore \
+            --hidden-import h11 \
+            --hidden-import anyio \
+            --hidden-import sniffio \
+            --hidden-import certifi \
+            --hidden-import idna \
+            --hidden-import zeroconf \
+            --hidden-import PIL \
+            --hidden-import PIL.Image \
+            --hidden-import PIL.ImageDraw \
+            --hidden-import PIL.ImageFont \
+            --hidden-import img2pdf \
+            --hidden-import pikepdf \
+            --hidden-import dotenv \
+            --hidden-import pytesseract \
+            --hidden-import pydantic \
+            \
+            --collect-all anthropic \
+            --collect-all zeroconf \
+            --collect-all pikepdf \
+            \
+            packaging/entrypoint.py
+
+      - name: Update Info.plist
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PLIST="dist/Auto Scan.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'Auto Scan'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'Auto Scan'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '$VERSION'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion '$VERSION'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier 'com.autoscan.app'" "$PLIST"
+
+      - name: Create DMG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dmg_temp
+          cp -R "dist/Auto Scan.app" dmg_temp/
+          ln -sf /Applications dmg_temp/Applications
+          hdiutil create \
+            -volname "Auto Scan" \
+            -srcfolder dmg_temp \
+            -ov \
+            -format UDZO \
+            "dist/AutoScan-${VERSION}-macOS.dmg"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/AutoScan-*-macOS.dmg
+
+  # ── Windows .exe ───────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+          pip install "pyinstaller>=6,<7"
+
+      - name: Generate icons
+        run: python packaging/icon_gen.py
+
+      - name: Build .exe with PyInstaller
+        run: |
+          pyinstaller `
+            --name "Auto Scan" `
+            --windowed `
+            --icon packaging/icon.ico `
+            --noconfirm `
+            --clean `
+            `
+            --hidden-import auto_scan `
+            --hidden-import auto_scan.gui `
+            --hidden-import auto_scan.cli `
+            --hidden-import auto_scan.config `
+            --hidden-import auto_scan.pipeline `
+            --hidden-import auto_scan.organizer `
+            --hidden-import auto_scan.recognition `
+            --hidden-import auto_scan.recognition.engine `
+            --hidden-import auto_scan.recognition.prompts `
+            --hidden-import auto_scan.scanner `
+            --hidden-import auto_scan.scanner.discovery `
+            --hidden-import auto_scan.scanner.escl `
+            --hidden-import auto_scan.redactor `
+            --hidden-import auto_scan.dedup `
+            --hidden-import auto_scan.history `
+            --hidden-import auto_scan.image_utils `
+            --hidden-import auto_scan.settings `
+            --hidden-import auto_scan.usage `
+            --hidden-import auto_scan.analyzer `
+            `
+            --hidden-import flask `
+            --hidden-import flask.json `
+            --hidden-import jinja2 `
+            --hidden-import markupsafe `
+            --hidden-import werkzeug `
+            --hidden-import anthropic `
+            --hidden-import httpx `
+            --hidden-import httpcore `
+            --hidden-import h11 `
+            --hidden-import anyio `
+            --hidden-import sniffio `
+            --hidden-import certifi `
+            --hidden-import idna `
+            --hidden-import zeroconf `
+            --hidden-import PIL `
+            --hidden-import PIL.Image `
+            --hidden-import PIL.ImageDraw `
+            --hidden-import PIL.ImageFont `
+            --hidden-import img2pdf `
+            --hidden-import pikepdf `
+            --hidden-import dotenv `
+            --hidden-import pytesseract `
+            --hidden-import pydantic `
+            `
+            --collect-all anthropic `
+            --collect-all zeroconf `
+            --collect-all pikepdf `
+            `
+            packaging/entrypoint.py
+
+      - name: Create zip archive
+        run: |
+          $VERSION = "${{ github.ref_name }}".TrimStart("v")
+          Compress-Archive -Path "dist\Auto Scan" -DestinationPath "dist\AutoScan-${VERSION}-Windows.zip"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/AutoScan-*-Windows.zip
+
+  # ── Create GitHub Release ──────────────────────────────────────
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Auto Scan ${{ github.ref_name }}"
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/macos-dmg/*.dmg
+            artifacts/windows-exe/*.zip
+          body: |
+            ## Auto Scan ${{ github.ref_name }}
+
+            ### Downloads
+            - **macOS**: `AutoScan-*-macOS.dmg` — open, drag to Applications, launch
+            - **Windows**: `AutoScan-*-Windows.zip` — extract, run `Auto Scan.exe`
+
+            ### First launch
+            1. Open the app — your browser opens to the Auto Scan GUI
+            2. Go to **Settings** and enter your [Anthropic API key](https://console.anthropic.com/settings/keys)
+            3. Start scanning!
+
+            ### Optional
+            - Install [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for the privacy/redaction feature
