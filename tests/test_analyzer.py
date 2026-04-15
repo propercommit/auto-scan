@@ -9,9 +9,8 @@ import json
 import pytest
 from PIL import Image
 
-from auto_scan.analyzer import (
+from auto_scan.recognition.engine import (
     DocumentInfo,
-    ALL_CATEGORIES,
     _open_image,
     _resize_for_api,
     _label_page,
@@ -22,6 +21,7 @@ from auto_scan.analyzer import (
     _repair_truncated_json,
     _parse_batch_results,
 )
+from auto_scan.recognition.prompts import ALL_CATEGORIES
 from auto_scan import AnalysisError
 from helpers import make_test_image, make_test_image_with_header
 
