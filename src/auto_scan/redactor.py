@@ -8,12 +8,29 @@ The redacted image is sent to the API; the original is kept for PDF output.
 from __future__ import annotations
 
 import io
+import platform
 import re
 import shutil
 import sys
 from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw, ImageFilter
+
+
+def tesseract_install_hint() -> str:
+    """Return OS-specific install instructions for Tesseract OCR."""
+    system = platform.system()
+    if system == "Darwin":
+        return "brew install tesseract"
+    elif system == "Windows":
+        return (
+            "Download the installer from "
+            "https://github.com/UB-Mannheim/tesseract/wiki "
+            "and add it to your PATH, or run: "
+            "winget install UB-Mannheim.TesseractOCR"
+        )
+    else:
+        return "sudo apt install tesseract-ocr  (or your distro's package manager)"
 
 # ── Sensitive patterns ──────────────────────────────────────────────
 
@@ -135,7 +152,7 @@ def redact_image(
         return RedactionResult(
             redacted_image=image_data,
             skipped=True,
-            skip_reason="tesseract is not installed (brew install tesseract)",
+            skip_reason=f"tesseract is not installed. {tesseract_install_hint()}",
         )
 
     try:

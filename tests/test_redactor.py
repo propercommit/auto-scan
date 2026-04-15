@@ -14,6 +14,7 @@ from auto_scan.redactor import (
     RedactionResult,
     _has_tesseract,
     redact_image,
+    tesseract_install_hint,
 )
 from helpers import make_test_image
 
@@ -258,6 +259,16 @@ class TestRedactImageFallbacks:
         assert result.redacted_image == img_data
         assert "tesseract" in result.skip_reason
 
+    def test_skip_reason_includes_install_hint(self, monkeypatch):
+        """Skip reason should include OS-specific install instructions."""
+        monkeypatch.setattr("auto_scan.redactor._has_tesseract", lambda: False)
+        img_data = make_test_image()
+        result = redact_image(img_data)
+        assert result.skipped is True
+        # Should contain the hint (not the old hardcoded "brew install")
+        hint = tesseract_install_hint()
+        assert hint in result.skip_reason
+
     def test_no_active_patterns_returns_original(self, monkeypatch):
         monkeypatch.setattr("auto_scan.redactor._has_tesseract", lambda: True)
         # pytesseract must be importable for this path
@@ -269,3 +280,26 @@ class TestRedactImageFallbacks:
         result = redact_image(img_data, enabled_patterns=set())
         assert result.skipped is False
         assert result.redaction_count == 0
+
+
+class TestTesseractInstallHint:
+    """Test OS-specific install instructions for tesseract."""
+
+    def test_returns_string(self):
+        hint = tesseract_install_hint()
+        assert isinstance(hint, str)
+        assert len(hint) > 10
+
+    def test_macos_hint(self, monkeypatch):
+        monkeypatch.setattr("auto_scan.redactor.platform.system", lambda: "Darwin")
+        assert "brew" in tesseract_install_hint()
+
+    def test_windows_hint(self, monkeypatch):
+        monkeypatch.setattr("auto_scan.redactor.platform.system", lambda: "Windows")
+        hint = tesseract_install_hint()
+        assert "UB-Mannheim" in hint
+        assert "winget" in hint
+
+    def test_linux_hint(self, monkeypatch):
+        monkeypatch.setattr("auto_scan.redactor.platform.system", lambda: "Linux")
+        assert "apt" in tesseract_install_hint()

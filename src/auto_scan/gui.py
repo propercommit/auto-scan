@@ -150,8 +150,16 @@ def index():
 
 @app.route("/api/config")
 def api_config():
+    import shutil
+    from auto_scan.redactor import tesseract_install_hint
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    return jsonify({"has_api_key": has_key})
+    has_tesseract = shutil.which("tesseract") is not None
+    return jsonify({
+        "has_api_key": has_key,
+        "has_tesseract": has_tesseract,
+        "tesseract_hint": tesseract_install_hint(),
+        "platform": platform.system(),
+    })
 
 
 @app.route("/api/settings")
@@ -180,7 +188,8 @@ def api_test_ocr():
 
     # Check tesseract binary
     if not shutil.which("tesseract"):
-        result["details"] = "tesseract is not installed. Run: brew install tesseract"
+        from auto_scan.redactor import tesseract_install_hint
+        result["details"] = f"tesseract is not installed. {tesseract_install_hint()}"
         return jsonify(result)
     result["tesseract"] = True
 
@@ -188,7 +197,7 @@ def api_test_ocr():
     try:
         import pytesseract
     except ImportError:
-        result["details"] = "pytesseract Python package not installed. Run: pip install pytesseract"
+        result["details"] = "pytesseract Python package is not installed. Run: pip install pytesseract"
         return jsonify(result)
     result["pytesseract"] = True
 
@@ -1898,6 +1907,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <span>Redact sensitive data before sending to AI</span>
       </label>
       <div class="field-hint">Uses local OCR to detect and black out sensitive patterns in images before they reach the API. Requires <code>tesseract</code> and <code>pytesseract</code>.</div>
+      <div id="tesseract-hint" style="display:none;margin-top:6px;padding:8px 12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:6px;font-size:13px;color:#92400e"></div>
       <div style="margin-top:8px"><button class="btn btn-secondary" id="btn-test-ocr" style="width:auto;padding:6px 14px;font-size:13px" onclick="testOCR()">Test OCR</button><span id="ocr-test-result" style="margin-left:10px;font-size:13px"></span></div>
       <div id="redact-patterns" style="display:none;margin-top:8px;padding-left:26px">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer"><input type="checkbox" value="ssn" checked onchange="saveSettings()" style="width:auto;accent-color:var(--primary)"> SSN (US Social Security)</label>
@@ -2180,6 +2190,12 @@ let pendingRisk = {level: null, risks: []};
       $('#usage-nokey').style.display = ''; $('#usage-content').style.display = 'none';
     } else {
       $('#usage-nokey').style.display = 'none'; $('#usage-content').style.display = '';
+    }
+    // Show tesseract install hint if not found
+    const hintEl = $('#tesseract-hint');
+    if (hintEl && !data.has_tesseract) {
+      hintEl.style.display = '';
+      hintEl.innerHTML = '\u26a0\ufe0f <strong>Tesseract not found.</strong> ' + _esc(data.tesseract_hint);
     }
   } catch(e) {}
   refreshLog();
