@@ -1461,11 +1461,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .crop-box { position: absolute; border: 2px dashed #fff; background: rgba(59,130,246,.15); box-shadow: 0 0 0 9999px rgba(0,0,0,.5); pointer-events: none; }
   .lightbox-label { color: #fff; font-size: 15px; font-weight: 600; margin-top: 12px; }
   .redact-preview-split { display: flex; gap: 20px; align-items: flex-start; max-width: 95vw; width: 95vw; }
-  .redact-preview-pane { flex: 1; text-align: center; min-width: 0; }
-  .redact-preview-pane img { max-width: 100%; max-height: 80vh; border-radius: 4px; border: 2px solid rgba(255,255,255,.15); cursor: pointer; transition: opacity .2s; }
-  .redact-preview-pane img:hover { opacity: .85; }
+  .redact-preview-pane { flex: 1; text-align: center; min-width: 0; overflow: hidden; position: relative; }
+  .redact-preview-pane img { max-width: 100%; max-height: 80vh; border-radius: 4px; border: 2px solid rgba(255,255,255,.15); cursor: grab; transition: border-color .2s; transform-origin: 0 0; }
+  .redact-preview-pane img:hover { border-color: rgba(255,255,255,.35); }
+  .redact-preview-pane img:active { cursor: grabbing; }
+  .redact-preview-pane img.zoomed-in { cursor: grab; max-width: none; max-height: none; }
   .redact-preview-label { color: rgba(255,255,255,.7); font-size: 13px; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
-  .redact-preview-pane img.zoomed { position: fixed; inset: 0; max-width: 100vw; max-height: 100vh; width: auto; height: auto; margin: auto; z-index: 10001; border: none; border-radius: 0; object-fit: contain; background: rgba(0,0,0,.95); padding: 10px; }
+  .redact-zoom-hint { color: rgba(255,255,255,.4); font-size: 12px; margin-top: 6px; }
   .lightbox-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(255,255,255,.15); border: none; color: #fff; font-size: 32px; width: 48px; height: 48px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background var(--transition); }
   .lightbox-nav:hover { background: rgba(255,255,255,.3); }
   .lightbox-nav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
@@ -1907,13 +1909,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button class="lightbox-nav lightbox-prev" onclick="redactPreviewNav(-1)" aria-label="Previous page">&#8249;</button>
   <button class="lightbox-nav lightbox-next" onclick="redactPreviewNav(1)" aria-label="Next page">&#8250;</button>
   <div class="redact-preview-split">
-    <div class="redact-preview-pane">
+    <div class="redact-preview-pane" id="redact-pane-orig">
       <div class="redact-preview-label">Original</div>
       <img id="redact-preview-orig" src="" alt="Original page">
+      <div class="redact-zoom-hint">Scroll to zoom &middot; Drag to pan &middot; Double-click to reset</div>
     </div>
-    <div class="redact-preview-pane">
+    <div class="redact-preview-pane" id="redact-pane-redacted">
       <div class="redact-preview-label">Redacted (sent to AI)</div>
       <img id="redact-preview-redacted" src="" alt="Redacted page">
+      <div class="redact-zoom-hint">Scroll to zoom &middot; Drag to pan &middot; Double-click to reset</div>
     </div>
   </div>
   <div class="lightbox-label" id="redact-preview-info"></div>
@@ -3397,6 +3401,7 @@ function showRedactPreviewPage() {
   $('#redact-preview-orig').src = '/api/original-image/' + pNum;
   $('#redact-preview-redacted').src = '/api/redacted-image/' + pNum;
   $('#redact-preview-info').textContent = 'Page ' + pNum + ' (' + (_redactPreviewIdx + 1) + '/' + _redactedPages.length + ')';
+  if (window._resetRedactZoom) window._resetRedactZoom();
 }
 
 function redactPreviewNav(dir) {
@@ -3406,26 +3411,79 @@ function redactPreviewNav(dir) {
 
 $('#redact-preview').addEventListener('click', e => { if (e.target === $('#redact-preview')) closeRedactPreview(); });
 
-// Click image to zoom fullscreen, click again to unzoom
-document.querySelectorAll('#redact-preview .redact-preview-pane img').forEach(img => {
-  img.addEventListener('click', e => {
-    e.stopPropagation();
-    if (img.classList.contains('zoomed')) {
-      img.classList.remove('zoomed');
-    } else {
-      // Unzoom any other zoomed image first
-      document.querySelectorAll('#redact-preview img.zoomed').forEach(z => z.classList.remove('zoomed'));
-      img.classList.add('zoomed');
-    }
-  });
-});
-// Escape also unzooms
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    const zoomed = document.querySelector('#redact-preview img.zoomed');
-    if (zoomed) { zoomed.classList.remove('zoomed'); e.stopImmediatePropagation(); }
+// ── Scroll-zoom + drag-pan for redact preview images ───────────────
+(function() {
+  const imgs = ['#redact-preview-orig', '#redact-preview-redacted'];
+  const zoomState = {};
+
+  function initZoom(sel) {
+    zoomState[sel] = { scale: 1, tx: 0, ty: 0, dragging: false, sx: 0, sy: 0 };
   }
-}, true);
+  imgs.forEach(initZoom);
+
+  function applyTransform(sel) {
+    const s = zoomState[sel], img = $(sel);
+    if (!img) return;
+    img.style.transform = 'translate(' + s.tx + 'px,' + s.ty + 'px) scale(' + s.scale + ')';
+    img.classList.toggle('zoomed-in', s.scale > 1.05);
+  }
+
+  function resetZoom(sel) {
+    initZoom(sel);
+    const img = $(sel);
+    if (img) { img.style.transform = ''; img.classList.remove('zoomed-in'); }
+  }
+
+  // Reset both when changing page
+  window._resetRedactZoom = function() { imgs.forEach(resetZoom); };
+
+  imgs.forEach(sel => {
+    const img = $(sel);
+    if (!img) return;
+    const pane = img.parentElement;
+
+    // Scroll to zoom — zoom toward cursor position
+    pane.addEventListener('wheel', e => {
+      e.preventDefault();
+      const s = zoomState[sel];
+      const rect = img.getBoundingClientRect();
+      // Cursor position relative to the image's natural top-left
+      const cx = (e.clientX - rect.left) / s.scale;
+      const cy = (e.clientY - rect.top) / s.scale;
+
+      const prev = s.scale;
+      const delta = e.deltaY > 0 ? 0.85 : 1.18;
+      s.scale = Math.max(1, Math.min(10, s.scale * delta));
+
+      // Adjust translation so zoom centers on cursor
+      s.tx = s.tx - cx * (s.scale - prev);
+      s.ty = s.ty - cy * (s.scale - prev);
+
+      // Clamp so image doesn't fly off
+      if (s.scale <= 1) { s.tx = 0; s.ty = 0; }
+      applyTransform(sel);
+    }, {passive: false});
+
+    // Drag to pan
+    img.addEventListener('mousedown', e => {
+      if (zoomState[sel].scale <= 1) return;
+      e.preventDefault();
+      const s = zoomState[sel];
+      s.dragging = true; s.sx = e.clientX - s.tx; s.sy = e.clientY - s.ty;
+    });
+    window.addEventListener('mousemove', e => {
+      const s = zoomState[sel];
+      if (!s.dragging) return;
+      s.tx = e.clientX - s.sx;
+      s.ty = e.clientY - s.sy;
+      applyTransform(sel);
+    });
+    window.addEventListener('mouseup', () => { zoomState[sel].dragging = false; });
+
+    // Double-click to reset
+    img.addEventListener('dblclick', e => { e.stopPropagation(); resetZoom(sel); });
+  });
+})();
 
 // Click lightbox background to close (but not on image or buttons)
 $('#lightbox').addEventListener('click', e => { if (e.target === $('#lightbox') && !_cropping) closeLightbox(); });
