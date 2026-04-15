@@ -92,11 +92,11 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           PLIST="dist/Auto Scan.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'Auto Scan'" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'Auto Scan'" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '$VERSION'" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion '$VERSION'" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier 'com.autoscan.app'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'Auto Scan'" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleName string 'Auto Scan'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'Auto Scan'" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 'Auto Scan'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString '$VERSION'" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string '$VERSION'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion '$VERSION'" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string '$VERSION'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier 'com.autoscan.app'" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string 'com.autoscan.app'" "$PLIST"
 
       - name: Create DMG
         run: |
