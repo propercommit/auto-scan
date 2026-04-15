@@ -21,6 +21,7 @@ from auto_scan.recognition.engine import (
     _detect_page_numbers,
     _repair_truncated_json,
     _parse_batch_results,
+    _parse_grouping_results,
 )
 from auto_scan.recognition.prompts import ALL_CATEGORIES
 from auto_scan import AnalysisError
@@ -376,6 +377,83 @@ class TestParseBatchResults:
         assert kf["subject"] == "fiber_bill"
         assert kf["ref_number"] == "SC-9921"
         assert kf["amount"] == "CHF 59.00"  # existing key_fields preserved
+
+
+# ── Grouping result parsing (2-step batch pipeline) ──────────────
+
+class TestParseGroupingResults:
+    """Test validation and normalization of page grouping output."""
+
+    def test_valid_grouping(self):
+        data = [
+            {"pages": [1, 3], "confidence": 95,
+             "page_confidence": {"1": 95, "3": 80}, "reasoning": "same header"},
+            {"pages": [2], "confidence": 98,
+             "page_confidence": {"2": 98}, "reasoning": "standalone"},
+        ]
+        groups = _parse_grouping_results(data, num_pages=3)
+        assert len(groups) == 2
+        assert groups[0]["pages"] == [1, 3]
+        assert groups[0]["confidence"] == 95
+        assert groups[0]["page_confidence"] == {1: 95, 3: 80}
+        assert groups[1]["pages"] == [2]
+
+    def test_missing_pages_get_own_group(self):
+        """Pages the model forgot are assigned to individual groups."""
+        data = [{"pages": [1, 2], "confidence": 90}]
+        groups = _parse_grouping_results(data, num_pages=4)
+        assert len(groups) == 3  # original + page 3 + page 4
+        # Missing pages get low confidence
+        assert groups[1]["pages"] == [3]
+        assert groups[1]["confidence"] == 50
+        assert groups[2]["pages"] == [4]
+
+    def test_duplicate_page_kept_in_first_group(self):
+        """A page appearing in multiple groups stays in the first one."""
+        data = [
+            {"pages": [1, 2], "confidence": 90},
+            {"pages": [2, 3], "confidence": 85},  # page 2 is duplicate
+        ]
+        groups = _parse_grouping_results(data, num_pages=3)
+        assert groups[0]["pages"] == [1, 2]
+        assert groups[1]["pages"] == [3]  # page 2 removed from second group
+
+    def test_invalid_page_numbers_ignored(self):
+        """Page numbers outside 1..num_pages are silently dropped."""
+        data = [
+            {"pages": [1, 99], "confidence": 90},
+            {"pages": [2], "confidence": 80},
+        ]
+        groups = _parse_grouping_results(data, num_pages=2)
+        assert groups[0]["pages"] == [1]
+        assert groups[1]["pages"] == [2]
+
+    def test_confidence_cast_to_int(self):
+        data = [{"pages": [1], "confidence": "87", "page_confidence": {"1": "92"}}]
+        groups = _parse_grouping_results(data, num_pages=1)
+        assert groups[0]["confidence"] == 87
+        assert groups[0]["page_confidence"] == {1: 92}
+
+    def test_empty_group_skipped(self):
+        """A group with no valid pages is omitted from results."""
+        data = [
+            {"pages": [99], "confidence": 90},  # all pages invalid
+            {"pages": [1], "confidence": 95},
+        ]
+        groups = _parse_grouping_results(data, num_pages=1)
+        assert len(groups) == 1
+        assert groups[0]["pages"] == [1]
+
+    def test_missing_confidence_defaults_to_100(self):
+        data = [{"pages": [1, 2]}]
+        groups = _parse_grouping_results(data, num_pages=2)
+        assert groups[0]["confidence"] == 100
+
+    def test_reasoning_preserved(self):
+        data = [{"pages": [1], "confidence": 90,
+                 "reasoning": "Standalone AXA letter"}]
+        groups = _parse_grouping_results(data, num_pages=1)
+        assert groups[0]["reasoning"] == "Standalone AXA letter"
 
 
 # ── DocumentInfo dataclass ────────────────────────────────────────

@@ -10,9 +10,10 @@ Placeholders filled at runtime:
     {num_pages}    — number of scanned pages (batch/verify)
     {num_uncertain}, {uncertain_list}, {initial_grouping} — verify only
 
-Pipeline:
-    1. ANALYSIS_PROMPT        — single document (1–20 pages) → classify + extract
-    2. BATCH_ANALYSIS_PROMPT  — mixed stack → group pages + classify each group
+Pipeline (batch uses a 2-step approach for higher accuracy):
+    1. ANALYSIS_PROMPT        — classify + extract a single document (1–20 pages)
+    2. BATCH_GROUPING_PROMPT  — group pages from a mixed stack (grouping only)
+       then ANALYSIS_PROMPT   — classify each group separately (reuses step 1)
     3. VERIFY_PROMPT          — second pass on uncertain groupings (Opus + extended thinking)
     4. RISK_PROMPT            — optional separate pass for risk/scam analysis (future)
 """
@@ -126,74 +127,81 @@ EXAMPLE — a BMW sales contract:
 }}"""
 
 
-# ── Batch sorting & classification ────────────────────────────────
-# Used by analyze_batch() when the feeder scans a mixed stack.
-# The model must group pages into documents AND classify each group.
+# ── Batch page grouping (step 1 of 2-step pipeline) ──────────────
+# Used by analyze_batch(). The model's ONLY job here is to figure out
+# which pages belong together. Classification happens in step 2 by
+# reusing ANALYSIS_PROMPT per group. Keeping grouping separate reduces
+# cognitive load and improves accuracy on both tasks.
 
-BATCH_ANALYSIS_PROMPT = """\
-You are a document sorting and classification expert. You receive {num_pages} scanned pages from a mixed stack fed through an automatic document feeder. Pages from DIFFERENT documents are likely shuffled together. Each image is labeled with its page number in the top-left corner.
+BATCH_GROUPING_PROMPT = """\
+You receive {num_pages} scanned pages from a mixed stack. Pages from \
+DIFFERENT documents are shuffled together. Each image is labeled with \
+its page number (1–{num_pages}).
 
-Your job: read every page, figure out which pages belong together as one document, and classify each document.
+Your ONLY job: figure out which pages belong to the SAME document.
+Do NOT classify or extract data — just group the pages.
 
-═══ STEP 1: THOROUGHLY READ EVERY PAGE ═══
-For each page, carefully examine:
-  a) Document TYPE — what kind of document is this? (invoice, insurance policy, sales contract, bank statement, medical report, tax form, letter, certificate, permit, rental agreement, payslip, receipt, warranty card, prescription, court document, birth/marriage/death certificate, transcript, membership card, donation receipt, etc.)
-  b) Header/letterhead — company name, logo, organization, government body
-  c) Reference numbers — invoice #, policy #, contract #, order #, case #, account #, claim #, file #
-  d) Sender and recipient — who wrote this and to whom
-  e) Page numbering — "Page 2 of 4", "2/4", sequential numbering
-  f) Language and formatting — font, layout, paper style, stamps, signatures
-  g) Content topic — what is this page actually about?
+═══ READ EVERY PAGE ═══
+For each page, note:
+  a) Document TYPE visible on the page (invoice, letter, policy, form…)
+  b) Header / letterhead / logo
+  c) Reference numbers (invoice #, policy #, contract #, account #)
+  d) Sender and recipient
+  e) Page numbering ("Page 2 of 4", "2/4", footers)
+  f) Language, formatting, visual style
+  g) What the page is actually about
 
-═══ STEP 2: GROUP BY DOCUMENT IDENTITY ═══
-Two pages belong to the SAME document ONLY when ALL of these match:
-  - Same document TYPE (an insurance policy ≠ a sales contract, even if from the same company)
-  - Same reference/policy/contract/invoice number
-  - Same sender AND recipient pair
-  - Compatible page numbering (page 1,2,3 — not two page 1s)
-  - Same formatting, letterhead, and visual style
-  - Continuous narrative or data (page 2 continues where page 1 left off)
+═══ GROUPING RULES ═══
+Two pages belong to the SAME document ONLY when ALL match:
+  ✓ Same document TYPE
+  ✓ Same reference / policy / contract / invoice number
+  ✓ Same sender AND recipient
+  ✓ Compatible page numbering (no duplicate page numbers)
+  ✓ Same formatting, letterhead, visual style
+  ✓ Content continues from one page to the next
 
-CRITICAL — these are ALWAYS separate documents:
-  ✗ An insurance document and a sales contract → 2 docs, even if same company
-  ✗ A cover letter and the enclosed form or attachment → 2 docs
-  ✗ Different document types with different headers → separate
-  ✗ Pages about different topics, transactions, or time periods → separate
-  ✗ A renewal notice and the original policy → 2 docs
+These are ALWAYS separate documents:
+  ✗ Different document types (insurance policy ≠ sales contract)
+  ✗ A cover letter and the enclosed form → 2 docs
   ✗ A receipt and the invoice for the same purchase → 2 docs
-  ✗ Documents in different languages (unless clearly one bilingual document) → likely separate
+  ✗ Different headers or letterheads → separate
+  ✗ A renewal notice and the original policy → 2 docs
+  ✗ Documents in different languages → likely separate
   ✗ A terms & conditions insert and the main document → 2 docs
 
-WHEN IN DOUBT → SPLIT. It is much better to over-split (create too many small documents) than to wrongly merge pages from different documents into one.
+WHEN IN DOUBT → SPLIT. Over-splitting is always safer than wrong merges.
 
-The CONTENT and DOCUMENT TYPE visible on the page is the strongest grouping signal. Trust what you see on each page, not assumptions about what "should" be together.
+═══ OUTPUT ═══
+Return ONLY valid JSON (no markdown) — an array of page groups:
 
-═══ STEP 3: CLASSIFY AND OUTPUT ═══
-For each document group, determine the best category, extract structured fields, and provide key information.
+[
+  {{
+    "pages": [1, 3],
+    "confidence": 95,
+    "page_confidence": {{"1": 95, "3": 75}},
+    "reasoning": "Same AXA letterhead, policy #AX-4821 on both, page 3 is Page 2 of 2"
+  }},
+  {{
+    "pages": [2],
+    "confidence": 98,
+    "page_confidence": {{"2": 98}},
+    "reasoning": "Standalone Vodafone invoice with unique INV-88431"
+  }}
+]
 
-Return ONLY valid JSON (no markdown) — an array of document groups:
+CONFIDENCE (0–100, per-page and per-group):
+  90–100: Strong evidence — matching reference numbers, explicit page numbering, \
+continuous content
+  70–89: Likely correct — similar style and content, but no definitive shared identifier
+  50–69: Uncertain — weak evidence, could plausibly belong elsewhere
+  Below 50: Very weak — little evidence for this grouping
 
-[{{"pages": [1, 2], "page_confidence": {{"1": 95, "2": 80}}, "confidence": 87, "category": "...", "issuer": "...", "subject": "...", "ref_number": "...", "summary": "...", "date": "YYYY-MM-DD or null", "key_fields": {{}}, "suggested_categories": [], "tags": [], "risk_level": "none"|"low"|"medium"|"high", "risks": []}}]
+"reasoning": one sentence explaining WHY these pages are grouped (or why a \
+single page is standalone). Cite specific evidence: reference numbers, \
+headers, page numbering.
 
-FIELD RULES:
-  - "issuer": the entity name as printed, normalized to a clean short form \
-(e.g. "Vodafone" not "Vodafone GmbH Kundenservice"). This is used to build the filename.
-  - "subject": brief specific subject — "march_mobile_bill" not just "bill". \
-This is used to build the filename.
-  - "ref_number": the most prominent reference/invoice/policy number, or null.
-
-CONFIDENCE SCORING (0–100):
-  - "page_confidence": for EACH page, how certain you are it belongs to THIS document group
-  - "confidence": overall confidence for the entire document grouping
-  - 90–100: Very clear — same header, reference number, continuous content
-  - 70–89: Likely — similar style and content, minor ambiguity
-  - 50–69: Uncertain — could plausibly belong to another group
-  - Below 50: Weak — little evidence for this grouping
-
-Categories: {categories}
-If none of these categories fits well, use "other" and make the subject descriptive.
-
-Pages numbered 1–{num_pages}. Every page must appear in exactly one group. Use the document date if visible, otherwise {today}. Tags: 5-15 lowercase keywords from actual content (entity names, product names, topics, amounts, locations — be specific, not generic)."""
+Every page (1–{num_pages}) must appear in exactly one group. No page may be \
+omitted or duplicated."""
 
 
 # ── Verification (second pass with extended thinking) ─────────────
@@ -290,12 +298,12 @@ SYSTEM_SINGLE = (
     "Never output explanations, thinking, or markdown — ONLY the JSON object."
 )
 
-SYSTEM_BATCH = (
-    "You are a document classification API. You ONLY output valid JSON arrays. "
-    "Never output explanations, thinking, or markdown — ONLY the JSON array. "
-    "Read the text on every page to classify correctly. "
-    "A page with 'Insurance' in the header is insurance, not sales. "
-    "Split different document types into separate groups."
+SYSTEM_BATCH_GROUPING = (
+    "You are a document page-grouping API. "
+    "Your job is to determine which scanned pages belong to the same document. "
+    "Output ONLY a valid JSON array of page groups. "
+    "No classification, no data extraction — just grouping. "
+    "No explanations, no markdown fences, no preamble."
 )
 
 SYSTEM_VERIFY = (

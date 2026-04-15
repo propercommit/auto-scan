@@ -24,10 +24,10 @@ from auto_scan.usage import check_rate_limit, record_usage
 from auto_scan.recognition.prompts import (
     ALL_CATEGORIES,
     ANALYSIS_PROMPT,
-    BATCH_ANALYSIS_PROMPT,
+    BATCH_GROUPING_PROMPT,
     VERIFY_PROMPT,
     SYSTEM_SINGLE,
-    SYSTEM_BATCH,
+    SYSTEM_BATCH_GROUPING,
     SYSTEM_VERIFY,
 )
 
@@ -363,15 +363,16 @@ def _maybe_redact(image_data: bytes, redact_enabled: bool, redact_patterns: set[
     return result.redacted_image
 
 
-def analyze_document(
-    images: list[bytes], config: Config,
+def _classify_images(
+    images: list[bytes], config: Config, client: anthropic.Anthropic,
     redact: bool = False, redact_patterns: set[str] | None = None,
 ) -> DocumentInfo:
-    """Send scanned page images to Claude Vision for classification and naming."""
-    check_rate_limit()
-    print("Analyzing document with AI...", file=sys.stderr)
+    """Core classification: send images to Claude Vision, parse structured response.
 
-    client = anthropic.Anthropic(api_key=config.api_key, timeout=120.0)
+    Shared by analyze_document() (single-doc) and analyze_batch() (per-group).
+    The caller is responsible for rate limiting and client creation.
+    """
+    check_rate_limit()
 
     # Build message content: one image block per page + text prompt
     content: list[dict] = []
@@ -465,6 +466,23 @@ def analyze_document(
         risks=data.get("risks", []),
     )
 
+    return doc_info
+
+
+def analyze_document(
+    images: list[bytes], config: Config,
+    redact: bool = False, redact_patterns: set[str] | None = None,
+) -> DocumentInfo:
+    """Send scanned page images to Claude Vision for classification and naming.
+
+    Public API for single-document analysis. Creates its own API client.
+    For batch use, the engine calls _classify_images() directly with a
+    shared client to avoid creating one per group.
+    """
+    print("Analyzing document with AI...", file=sys.stderr)
+    client = anthropic.Anthropic(api_key=config.api_key, timeout=120.0)
+    doc_info = _classify_images(images, config, client, redact, redact_patterns)
+
     print(f"  Category: {doc_info.category}", file=sys.stderr)
     print(f"  Filename: {doc_info.filename}", file=sys.stderr)
     print(f"  Summary:  {doc_info.summary}", file=sys.stderr)
@@ -498,31 +516,30 @@ def _repair_truncated_json(text: str) -> str:
     return text  # give up, return as-is
 
 
-# ── Batch analysis ──────────────────────────────────────────────────
+# ── Batch analysis (2-step pipeline: group → classify) ────────────
 
 
-def analyze_batch(
-    images: list[bytes], config: Config,
+def _group_pages(
+    images: list[bytes], config: Config, client: anthropic.Anthropic,
     redact: bool = False, redact_patterns: set[str] | None = None,
-) -> list[tuple[list[int], DocumentInfo]]:
-    """Analyze a batch of scanned pages, group by document, classify each group.
+) -> list[dict]:
+    """Step 1: Group pages into documents (grouping only, no classification).
 
-    Returns a list of (page_indices, DocumentInfo) tuples where page_indices
-    are 0-based indices into the images list.
+    Sends all page images with burned-in labels to the AI and asks it to
+    determine which pages belong together. The model focuses only on
+    grouping — classification happens in step 2 via _classify_images().
+
+    Returns a list of validated grouping dicts:
+        [{"pages": [1, 3], "confidence": 95,
+          "page_confidence": {1: 95, 3: 75}, "reasoning": "..."}]
     """
-    if len(images) > 50:
-        raise AnalysisError("Batch scan supports up to 50 pages. Please scan fewer pages.")
-
-    check_rate_limit()
-    print(f"Batch analyzing {len(images)} pages...", file=sys.stderr)
-    client = anthropic.Anthropic(api_key=config.api_key, timeout=180.0)
-
     # Pre-compute local grouping hints (header similarity + OCR page numbers)
     print("  Computing page grouping hints...", file=sys.stderr)
     page_hints = _compute_page_hints(images)
     if page_hints:
         print(f"  Hints ready ({page_hints.count(chr(10))} lines)", file=sys.stderr)
 
+    # Build labeled images for page identification
     content: list[dict] = []
     for i, img_data in enumerate(images):
         safe_img = _maybe_redact(img_data, redact, redact_patterns)
@@ -533,39 +550,35 @@ def analyze_batch(
             "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
         })
 
-    prompt_text = BATCH_ANALYSIS_PROMPT.format(
-        today=date.today().isoformat(),
-        categories=", ".join(ALL_CATEGORIES),
-        num_pages=len(images),
-    )
+    prompt_text = BATCH_GROUPING_PROMPT.format(num_pages=len(images))
     if page_hints:
         prompt_text += page_hints
-
     content.append({"type": "text", "text": prompt_text})
 
     try:
+        check_rate_limit()
         message = client.messages.create(
             model=config.claude_model,
-            max_tokens=8192,
-            system=SYSTEM_BATCH,
+            max_tokens=4096,
+            system=SYSTEM_BATCH_GROUPING,
             messages=[
                 {"role": "user", "content": content},
                 {"role": "assistant", "content": "["},
             ],
         )
     except anthropic.APITimeoutError as e:
-        raise AnalysisError("Claude API timed out. Try again or use fewer pages.") from e
+        raise AnalysisError("Claude API timed out during page grouping.") from e
     except anthropic.APIError as e:
-        raise AnalysisError(f"Claude API error: {e}") from e
+        raise AnalysisError(f"Claude API error during page grouping: {e}") from e
 
-    # Record token usage
     record_usage(message.usage.input_tokens, message.usage.output_tokens)
     print(
-        f"  Tokens: {message.usage.input_tokens:,} in + {message.usage.output_tokens:,} out",
+        f"  Grouping tokens: {message.usage.input_tokens:,} in + "
+        f"{message.usage.output_tokens:,} out",
         file=sys.stderr,
     )
 
-    # Extract text from response — prepend "[" from assistant prefill
+    # Parse response — prepend "[" from assistant prefill
     response_text = ""
     for block in message.content:
         if hasattr(block, "text"):
@@ -575,11 +588,11 @@ def analyze_batch(
     if response_text == "[":
         stop = message.stop_reason
         raise AnalysisError(
-            f"Empty response from Claude (stop_reason={stop}). "
-            f"The document may be too large — try scanning fewer pages."
+            f"Empty grouping response (stop_reason={stop}). "
+            f"The batch may be too large — try scanning fewer pages."
         )
 
-    # Strip markdown code fences
+    # Strip markdown fences
     if response_text.startswith("```"):
         lines = response_text.split("\n")
         if lines[0].startswith("```"):
@@ -588,35 +601,136 @@ def analyze_batch(
             lines = lines[:-1]
         response_text = "\n".join(lines).strip()
 
-    # Handle truncated JSON (max_tokens hit)
     if message.stop_reason == "max_tokens":
-        print("  Warning: response truncated (max_tokens), attempting repair", file=sys.stderr)
-        # Try to close any open arrays/objects
+        print("  Warning: grouping response truncated, attempting repair", file=sys.stderr)
         response_text = _repair_truncated_json(response_text)
 
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError as e:
-        # Log first 500 chars for debugging
         preview = response_text[:500] if response_text else "(empty)"
         raise AnalysisError(
-            f"Failed to parse batch response: {e}\nResponse preview: {preview}"
+            f"Failed to parse grouping response: {e}\nPreview: {preview}"
         ) from e
 
     if not isinstance(data, list):
-        # If it's a single object, wrap it
         if isinstance(data, dict) and "pages" in data:
             data = [data]
         else:
-            raise AnalysisError(f"Expected JSON array from batch analysis, got {type(data).__name__}")
+            raise AnalysisError(
+                f"Expected JSON array from grouping, got {type(data).__name__}"
+            )
 
-    results = _parse_batch_results(data)
+    return _parse_grouping_results(data, len(images))
 
-    for pages, doc_info in results:
-        page_nums = [p + 1 for p in pages]
-        print(f"  Doc: {doc_info.filename} (pages {page_nums}, confidence {doc_info.confidence}%)", file=sys.stderr)
 
-    # ── Verification pass for low-confidence pages ──────────────────
+def _parse_grouping_results(data: list[dict], num_pages: int) -> list[dict]:
+    """Validate and normalize page grouping results.
+
+    Ensures every page 1..num_pages appears exactly once, confidence
+    values are integers, and missing pages get their own group.
+    """
+    all_pages: set[int] = set()
+    groups: list[dict] = []
+
+    for group in data:
+        pages = group.get("pages", [])
+        confidence = int(group.get("confidence", 100))
+        page_conf = {int(k): int(v) for k, v in group.get("page_confidence", {}).items()}
+        reasoning = group.get("reasoning", "")
+
+        # Validate page numbers
+        valid_pages = []
+        for p in pages:
+            if not isinstance(p, int) or p < 1 or p > num_pages:
+                print(f"  Warning: ignoring invalid page number {p}", file=sys.stderr)
+                continue
+            if p in all_pages:
+                print(f"  Warning: page {p} in multiple groups, keeping first", file=sys.stderr)
+                continue
+            all_pages.add(p)
+            valid_pages.append(p)
+
+        if valid_pages:
+            groups.append({
+                "pages": valid_pages,
+                "confidence": confidence,
+                "page_confidence": page_conf,
+                "reasoning": reasoning,
+            })
+
+    # Any pages the model forgot get their own low-confidence group
+    missing = set(range(1, num_pages + 1)) - all_pages
+    if missing:
+        print(
+            f"  Warning: pages {sorted(missing)} not assigned, creating individual groups",
+            file=sys.stderr,
+        )
+        for p in sorted(missing):
+            groups.append({
+                "pages": [p],
+                "confidence": 50,
+                "page_confidence": {p: 50},
+                "reasoning": "Page not assigned by grouping model",
+            })
+
+    return groups
+
+
+def analyze_batch(
+    images: list[bytes], config: Config,
+    redact: bool = False, redact_patterns: set[str] | None = None,
+) -> list[tuple[list[int], DocumentInfo]]:
+    """Analyze a batch of scanned pages using a 2-step pipeline.
+
+    Pipeline:
+        1. Group pages  — AI determines which pages belong to the same document
+        2. Classify each group — reuses single-doc ANALYSIS_PROMPT per group
+        3. Verify uncertain  — Opus + extended thinking for low-confidence groups
+
+    Returns a list of (page_indices, DocumentInfo) tuples where page_indices
+    are 0-based indices into the images list.
+    """
+    if len(images) > 50:
+        raise AnalysisError("Batch scan supports up to 50 pages. Please scan fewer pages.")
+
+    print(f"Batch analyzing {len(images)} pages...", file=sys.stderr)
+    client = anthropic.Anthropic(api_key=config.api_key, timeout=180.0)
+
+    # ── Step 1: Group pages ──────────────────────────────────────
+    print("  Step 1: Grouping pages...", file=sys.stderr)
+    groups = _group_pages(images, config, client, redact, redact_patterns)
+
+    for g in groups:
+        pages = g["pages"]
+        conf = g["confidence"]
+        reason = g.get("reasoning", "")
+        print(f"    Group pages {pages} ({conf}%): {reason}", file=sys.stderr)
+
+    # ── Step 2: Classify each group ──────────────────────────────
+    print(f"  Step 2: Classifying {len(groups)} document(s)...", file=sys.stderr)
+    results: list[tuple[list[int], DocumentInfo]] = []
+
+    for i, group in enumerate(groups):
+        page_nums = group["pages"]          # 1-indexed from grouping
+        page_indices = [p - 1 for p in page_nums]  # 0-indexed for images list
+        group_images = [images[idx] for idx in page_indices]
+
+        print(f"    Classifying doc {i + 1}/{len(groups)} (pages {page_nums})...", file=sys.stderr)
+
+        doc_info = _classify_images(
+            group_images, config, client, redact=redact, redact_patterns=redact_patterns,
+        )
+
+        # Overlay grouping confidence onto the classification result
+        # (grouping confidence drives the verification pass)
+        doc_info.confidence = group["confidence"]
+        doc_info.page_confidence = group["page_confidence"]
+
+        print(f"      → {doc_info.filename}", file=sys.stderr)
+        results.append((page_indices, doc_info))
+
+    # ── Step 3: Verify uncertain pages ───────────────────────────
     CONFIDENCE_THRESHOLD = 90
     uncertain_pages = []
     for pages, doc_info in results:
@@ -627,9 +741,13 @@ def analyze_batch(
                 uncertain_pages.append(page_num)
 
     if uncertain_pages:
-        print(f"  {len(uncertain_pages)} uncertain page(s) (confidence < {CONFIDENCE_THRESHOLD}%), running verification...", file=sys.stderr)
+        print(
+            f"  Step 3: {len(uncertain_pages)} uncertain page(s) "
+            f"(confidence < {CONFIDENCE_THRESHOLD}%), running verification...",
+            file=sys.stderr,
+        )
         results = _verify_uncertain_pages(
-            images, results, uncertain_pages, content, config, client,
+            images, results, uncertain_pages, config, client,
             redact=redact, redact_patterns=redact_patterns,
         )
 
@@ -675,7 +793,6 @@ def _verify_uncertain_pages(
     images: list[bytes],
     results: list[tuple[list[int], DocumentInfo]],
     uncertain_pages: list[int],
-    original_content: list[dict],
     config: Config,
     client: anthropic.Anthropic,
     redact: bool = False,
@@ -807,9 +924,10 @@ def _verify_uncertain_pages(
         if target == "new":
             # Create a new single-page document
             results[src_idx][0].remove(page_0)
+            today = date.today().isoformat()
             new_doc = DocumentInfo(
                 category="other",
-                filename=f"{date.today().isoformat()}_page_{page}.pdf",
+                filename=build_filename({"category": "other"}, today),
                 summary=f"Separated by verification: {reason}",
                 date=None,
                 confidence=50,
